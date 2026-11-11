@@ -1,0 +1,13 @@
+.env
+.env.*
+!.env.example
+secrets.h
+*.bin
+*.elf
+*.map
+sdkconfig
+sdkconfig.old
+build/
+flash_backup_parts/
+*flash*backup*
+.DS_Store
