@@ -1,0 +1,21 @@
+# secrets — never commit
+.env
+.env.save
+
+# virtualenv
+.venv/
+
+# runtime state (screen calibration, etc.)
+.hidagent-data/
+
+# python artifacts
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# backup / editor clutter
+*.bak
+*.bak.*
+*.save
+.DS_Store
