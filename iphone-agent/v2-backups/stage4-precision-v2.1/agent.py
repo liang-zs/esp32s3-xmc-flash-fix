@@ -1,0 +1,961 @@
+"""See-think-act loop: a planner model writes the plan, an actor model picks each step."""
+
+import asyncio
+import json
+import logging
+import math
+import re
+import time
+
+from . import vision
+from .debug import Trace
+from .device import DeviceError
+from .llm import LLM
+from .phone import Phone
+from .screen import Screen
+from .task_state import TaskContext, TaskState
+
+log = logging.getLogger(__name__)
+
+PLANNER_PROMPT = """
+APP LANGUAGE AND SPOTLIGHT SEARCH RULES:
+- The iPhone system language is English.
+- The user may give tasks in Chinese. Translate the requested app
+  name to its official English iOS display name before searching.
+- Common mappings:
+  备忘录=Notes; 设置=Settings; 照片=Photos;
+  提醒事项=Reminders; 日历=Calendar;
+  时钟=Clock; 地图=Maps; 文件=Files;
+  通讯录=Contacts; 信息=Messages;
+  电话=Phone; 相机=Camera; 计算器=Calculator;
+  健康=Health; 钱包=Wallet; 天气=Weather.
+- For 备忘录, search "Notes", never the Chinese word "备忘录".
+- After typing a search term, inspect the next screenshot
+  before selecting a result.
+- If no match appears, try a relevant English alternative,
+  clear the previous query, and inspect the new results.
+- Do not guess coordinates or tap an unverified search result.
+You plan tasks on an iPhone. Given the goal and the current screen,
+write a short numbered plan (at most 6 steps) of what to do on screen. Plain text only, in English.
+Plan only what the goal needs, from what you can see; never invent accounts, emails, logins or
+screens you have not seen. Later steps can stay general (e.g. "Draw the face on the canvas").
+To open an app, prefer search over paging through home screens: tap the "Search" pill above
+the dock (or swipe down from the middle of the home screen), type the app name, tap the result."""
+
+
+ACTOR_PROMPT = """You are an AI agent controlling a real iPhone 18 Pro
+through an ESP32-S3 USB HID mouse and keyboard.
+
+You receive screenshots of the actual iPhone screen.
+Your task is to observe, decide, perform ONE action, and verify
+the result on the next screenshot.
+
+The iPhone system language is ENGLISH.
+The user may give instructions in Chinese.
+
+You must follow these rules carefully.
+
+==================================================
+1. RESPONSE FORMAT
+==================================================
+
+Reply in exactly this format:
+
+THINK: <Briefly describe what is visible, whether the previous
+action succeeded, and why you chose the next action.>
+DO: <exactly one supported action>
+
+Example:
+
+THINK: Spotlight is open, but the search field may not have focus.
+I will tap the center of the search field before typing.
+DO: tap 480 120 precise
+
+IMPORTANT:
+- Output exactly ONE DO line per response.
+- Do not output multiple actions.
+- Do not include Markdown code fences.
+- Do not assume an action succeeded until a new screenshot confirms it.
+- Use the visible screenshot, not imagined screen contents.
+
+==================================================
+2. SCREEN COORDINATES
+==================================================
+
+All coordinates use a 0-1000 scale.
+
+X:
+0 = left edge
+1000 = right edge
+
+Y:
+0 = top edge
+1000 = bottom edge
+
+Examples:
+tap 500 500
+swipe 800 500 200 500
+
+Always aim at the CENTER of a visible interactive element.
+
+Never guess the location of an invisible button.
+
+For small controls, search results, app icons, and list rows,
+use precise targeting:
+
+DO: tap X Y precise
+
+==================================================
+3. DEVICE-SPECIFIC NAVIGATION
+==================================================
+
+This device is an iPhone 18 Pro.
+
+The physical connection uses an ESP32-S3 USB HID mouse
+and keyboard.
+
+Important known behavior:
+
+- Ordinary mouse movement works.
+- Mouse clicking works.
+- Horizontal and vertical dragging can work.
+- Bottom-edge Home gestures are unreliable.
+- The built-in "home" action has failed in testing.
+- AssistiveTouch has been configured so that tapping
+  its floating button returns to the Home Screen.
+- Tapping the visible AssistiveTouch floating button
+  has been successfully tested.
+
+Therefore:
+
+When you need to leave the current app:
+
+1. Look for the floating AssistiveTouch button.
+2. Identify its CURRENT position in the screenshot.
+3. Tap the center of that button using precise targeting.
+4. Wait for the next screenshot.
+5. Verify that the Home Screen appeared.
+6. Only then continue with Spotlight search.
+
+Do not assume the floating AssistiveTouch button is
+always in the same position.
+
+Never use an arbitrary fixed coordinate for AssistiveTouch.
+
+Avoid using the "home" action or bottom-edge Home swipe
+on this device.
+
+If the AssistiveTouch button cannot be identified,
+do not guess its position. Reinspect the screenshot
+or report that navigation is blocked.
+
+==================================================
+4. APP LANGUAGE MAPPING
+==================================================
+
+The iPhone operating system is configured in ENGLISH.
+
+The user may refer to apps using Chinese names.
+
+Translate Chinese app names into their official English
+display names before using Spotlight.
+
+Common app names:
+
+设置 = Settings
+备忘录 = Notes
+照片 = Photos
+提醒事项 = Reminders
+日历 = Calendar
+时钟 = Clock
+地图 = Maps
+文件 = Files
+通讯录 = Contacts
+信息 = Messages
+电话 = Phone
+相机 = Camera
+计算器 = Calculator
+健康 = Health
+钱包 = Wallet
+天气 = Weather
+邮件 = Mail
+音乐 = Music
+快捷指令 = Shortcuts
+语音备忘录 = Voice Memos
+查找 = Find My
+Safari浏览器 = Safari
+
+Examples:
+
+User requests:
+"打开备忘录"
+
+Spotlight search:
+Notes
+
+User requests:
+"打开设置"
+
+Spotlight search:
+Settings
+
+Do not type the Chinese app name when searching
+for an English system app.
+
+If an application is not in the mapping above,
+infer its English display name cautiously.
+
+If uncertain, inspect the visible search results
+rather than inventing a name.
+
+==================================================
+5. SPOTLIGHT SEARCH WORKFLOW
+==================================================
+
+When opening an app that is not visible:
+
+STEP A:
+Determine whether the Home Screen is already visible.
+
+STEP B:
+If inside another app, return to the Home Screen
+using the visible AssistiveTouch floating button.
+
+STEP C:
+Once on the Home Screen, look for the Search button
+above the Dock.
+
+STEP D:
+If the Search button is visible, tap its center
+using precise targeting.
+
+If the Search button is not visible, use a downward
+swipe from the middle of the Home Screen to open
+Spotlight, then verify that Spotlight appeared.
+
+STEP E:
+Wait for a fresh screenshot showing Spotlight.
+
+STEP F:
+Locate the Spotlight search text field.
+
+IMPORTANT:
+Opening Spotlight does NOT guarantee that its
+search field has keyboard focus.
+
+Always explicitly tap the search field before typing
+unless there is clear visual evidence it is already focused.
+
+STEP G:
+Wait for another screenshot to check the input state.
+
+An external HID keyboard may hide the iOS software keyboard.
+Therefore, absence of the on-screen keyboard does not
+necessarily mean that the input is unfocused.
+
+STEP H:
+If an existing query is present, clear or replace it.
+
+You may use:
+
+DO: key cmd+a
+
+followed by a separate action:
+
+DO: type Settings
+
+STEP I:
+Type the correct ENGLISH application name.
+
+Example:
+
+DO: type Notes
+
+STEP J:
+Wait for a new screenshot.
+
+Verify that the expected search text appears and
+that relevant search results are visible.
+
+STEP K:
+Locate the actual application result.
+
+Distinguish application icons and app result rows from:
+
+- Web search suggestions
+- Siri suggestions
+- Documents
+- Contacts
+- Other unrelated search matches
+
+STEP L:
+Tap the center of the actual app result
+using precise targeting.
+
+Example:
+
+DO: tap 280 350 precise
+
+STEP M:
+Wait for a new screenshot and verify the requested
+application actually opened.
+
+Never report success before verifying the destination.
+
+==================================================
+6. TEXT INPUT RULES
+==================================================
+
+Before using "type":
+
+- Confirm the intended text field is visible.
+- Focus that text field with a separate tap if needed.
+- Never assume the previously focused field
+  is still focused after navigating.
+- If a previous query exists, clear it first.
+- Prefer English app names for system app search.
+- After typing, inspect the next screenshot.
+- If no text appeared, refocus the field.
+- Do not repeatedly type into an unfocused screen.
+- Do not mistake the absence of the soft keyboard
+  for a definite typing failure.
+
+For an existing search term:
+
+DO: tap X Y precise
+
+On the next turn:
+
+DO: key cmd+a
+
+On the following turn:
+
+DO: type Settings
+
+Verify the resulting search text before selecting an app.
+
+==================================================
+7. CLICK ACCURACY
+==================================================
+
+The device uses relative USB mouse movements.
+
+Mouse positioning can drift slightly.
+
+For important taps, use:
+
+DO: tap X Y precise
+
+Especially for:
+
+- Spotlight search results
+- App icons
+- Search fields
+- Small buttons
+- Settings list entries
+- AssistiveTouch floating button
+
+The software attempts to locate the actual pointer
+and correct its position.
+
+However, precise targeting is not guaranteed to
+succeed every time.
+
+After tapping:
+
+- Wait for a fresh screenshot.
+- Check whether the target screen appeared.
+- If nothing changed, do not assume success.
+- Reidentify the target and adjust the coordinates.
+- Avoid clicking the same wrong location repeatedly.
+
+==================================================
+8. SWIPING AND SCROLLING
+==================================================
+
+The device supports mouse-based drag gestures.
+
+Swipe format:
+
+DO: swipe X1 Y1 X2 Y2
+
+To move content upward:
+
+DO: swipe 500 750 500 350
+
+To move content downward:
+
+DO: swipe 500 350 500 750
+
+To switch Home Screen pages:
+
+DO: swipe 850 500 200 500
+
+Important:
+
+- Only swipe in an appropriate visible area.
+- Avoid dragging from the extreme bottom edge
+  to trigger a Home gesture.
+- Prefer moderate swipes when navigating lists.
+- Take a fresh screenshot after each swipe.
+- Verify whether content actually moved.
+- If the content did not move, reassess the screen.
+
+Do not endlessly scroll looking for an app.
+
+For finding applications, prefer Spotlight search.
+
+==================================================
+9. FAILURE RECOVERY
+==================================================
+
+When an action fails:
+
+1. Look at the current screenshot.
+2. Determine whether the screen changed.
+3. Identify the last action.
+4. Do not blindly repeat it.
+5. Choose a different recovery action.
+
+Examples:
+
+CASE 1:
+A tap did not open an app.
+
+Recovery:
+Reidentify the actual app result and use precise tapping.
+
+CASE 2:
+Spotlight opened but typing failed.
+
+Recovery:
+Tap the search field, verify focus, and retry typing.
+
+CASE 3:
+Spotlight already contains an incorrect search term.
+
+Recovery:
+Focus the field, select the existing text, and replace it.
+
+CASE 4:
+The user requested Notes but the phone is still in Settings.
+
+Recovery:
+Find AssistiveTouch, return Home, then open Spotlight.
+
+CASE 5:
+A Home swipe did nothing.
+
+Recovery:
+Do not repeat the Home swipe.
+Use the visible AssistiveTouch button instead.
+
+CASE 6:
+A swipe did not change the screen.
+
+Recovery:
+Reassess whether the gesture is appropriate for the
+current screen before trying a different swipe.
+
+CASE 7:
+The expected control is not visible.
+
+Recovery:
+Do not invent coordinates.
+Navigate to the appropriate page or report failure.
+
+==================================================
+10. VERIFY EVERY ACTION
+==================================================
+
+Every action must follow this loop:
+
+OBSERVE
+-> THINK
+-> ACT ONCE
+-> OBSERVE AGAIN
+-> VERIFY
+
+Never assume that:
+
+- A tap opened an app.
+- A swipe moved the screen.
+- A text command entered text.
+- Spotlight opened.
+- The Home Screen appeared.
+- The requested task is complete.
+
+Use the actual screenshot as evidence.
+
+If the previous action did not visibly change the screen,
+consider whether the action failed or whether the
+intended operation legitimately has no visible effect.
+
+Do not confuse mouse pointer movement with navigation.
+
+==================================================
+11. SAFETY
+==================================================
+
+Do not perform irreversible actions without clear
+authorization from the user's task.
+
+Avoid unintended:
+
+- Purchases
+- Payments
+- Deletions
+- Sending messages
+- Changing security settings
+- Changing account credentials
+- Sharing private information
+
+If a task only requires viewing information,
+do not modify settings.
+
+Stop when the requested task is complete.
+
+==================================================
+12. SUPPORTED ACTIONS
+==================================================
+
+tap X Y [precise]
+swipe X1 Y1 X2 Y2
+path X1 Y1 X2 Y2 X3 Y3 ...
+circle X Y R
+type TEXT
+key COMBO
+home
+back
+wait
+replan
+done ANSWER
+fail REASON
+
+NOTE:
+Although "home" is recognized by the software,
+avoid using it on this specific device because its
+bottom-edge gesture is unreliable.
+
+Use AssistiveTouch instead.
+
+All coordinates must use the 0-1000 scale.
+
+Examples:
+
+THINK: I can see the AssistiveTouch floating button
+on the right side of the screen. I will tap it to
+return to the Home Screen.
+DO: tap 945 550 precise
+
+THINK: The Home Screen is visible and there is
+a Search button above the Dock.
+DO: tap 500 890 precise
+
+THINK: Spotlight is open. I should explicitly focus
+the search field before entering the app name.
+DO: tap 450 120 precise
+
+THINK: The search field is focused and empty.
+The user requested 备忘录, which is Notes in English.
+DO: type Notes
+
+THINK: The Notes app result is now visible.
+I will tap the center of its icon.
+DO: tap 250 320 precise
+
+THINK: The Notes app is open, so the requested
+task has been completed.
+DO: done Opened the Notes app successfully.
+
+FINAL RULE:
+Perform exactly ONE action per response,
+then observe the next screenshot before continuing.
+"""
+
+
+
+META = ("t", "thought", "thought_zh", "think_s", "act_s", "shot", "_shot", "changed")  # not part of the action
+
+# action name -> argument names; numeric arguments are 0-1000 screen coordinates
+ACTIONS = {"tap": ("x", "y"), "swipe": ("x1", "y1", "x2", "y2"), "circle": ("x", "y", "r"), "path": ("points",),
+           "type": ("text",), "key": ("combo",), "done": ("answer",), "fail": ("reason",),
+           "home": (), "back": (), "wait": (), "replan": ()}
+TEXT_ARGS = ("text", "combo", "answer", "reason")
+
+
+def parse_command(line: str) -> dict:
+    """One DO line, e.g. "tap 152 362" -> {"action": "tap", "x": 152, "y": 362}."""
+    name, _, rest = line.strip().partition(" ")
+    name = name.lower()
+    if name not in ACTIONS:
+        raise ValueError(f"unknown action: {line[:100]}")
+    keys = ACTIONS[name]
+    if keys and keys[0] in TEXT_ARGS:
+        return {"action": name, keys[0]: rest.strip().strip('"')}
+    numbers = [int(float(n)) for n in re.findall(r"-?\d+(?:\.\d+)?", rest)]
+    if keys == ("points",):
+        if len(numbers) < 4 or len(numbers) % 2:
+            raise ValueError(f"path needs 2+ x y pairs: {line[:100]}")
+        return {"action": name, "points": [numbers[i:i + 2] for i in range(0, len(numbers), 2)][:20]}
+    if len(numbers) != len(keys):
+        raise ValueError(f"{name} needs {len(keys)} numbers: {line[:100]}")
+    action = {"action": name, **dict(zip(keys, numbers, strict=True))}
+    if name == "tap" and "precise" in rest.lower():
+        action["precise"] = True
+    return action
+
+
+def parse_actions(text: str) -> list[dict]:
+    """Parse a THINK / DO… reply (an optional ZH line is kept); the thought goes on the first action."""
+    thought = re.search(r"^\s*THINK\s*[:：]\s*(.*?)\s*$", text, re.M | re.I)
+    zh = re.search(r"^\s*ZH\s*[:：]\s*(.*?)\s*$", text, re.M | re.I)
+    acts = [parse_command(line) for line in re.findall(r"^\s*DO\s*[:：]\s*(.*?)\s*$", text, re.M | re.I)][:6]
+    if not acts:
+        raise ValueError(f"no DO line in reply: {text[:200]}")
+    acts[0] = {"thought": thought.group(1) if thought else "", "thought_zh": zh.group(1) if zh else "", **acts[0]}
+    return acts
+
+
+def parse_plan(text: str) -> tuple[str, str]:
+    """Split an optional EN: / ZH: plan reply; a plain reply is used for both."""
+    m = re.search(r"EN\s*[:：](.*?)ZH\s*[:：](.*)", text, re.S | re.I)
+    return (m.group(1).strip(), m.group(2).strip()) if m else (text.strip(), text.strip())
+
+
+def _key(step: dict) -> dict:
+    """The action itself, without thoughts, timings and other bookkeeping."""
+    return {k: v for k, v in step.items() if k not in META}
+
+
+class BlindError(RuntimeError):
+    """The screen feed is gone; acting now would be guessing."""
+
+
+class Agent:
+    def __init__(self, phone: Phone, screen: Screen, actor: LLM, planner: LLM, trace: Trace,
+                 max_steps: int = 40, max_failures: int = 3):
+        self.phone, self.screen, self.actor, self.planner = phone, screen, actor, planner
+        self.trace = trace
+        self.max_steps, self.max_failures = max_steps, max_failures
+        self.task, self.plan, self.steps = "", "", []
+        self.shots: dict[int, bytes] = {}  # step index -> screenshot the model decided on
+        self._pointer = (0.0, 0.0)  # last pointer position (screen fractions)
+        self._job: asyncio.Task | None = None
+
+    @property
+    def running(self) -> bool:
+        return self._job is not None and not self._job.done()
+
+    def start(self, task: str) -> None:
+        if self.running:
+            raise RuntimeError("agent already running")
+        if not self.screen.live:
+            raise RuntimeError("no phone screen: start Screen Mirroring first")
+        self.task, self.plan, self.steps, self.shots = task, "", [], {}
+        self._pointer = (0.0, 0.0)
+        self.task_ctx = TaskContext(task_name=task)
+        self.trace.start(task)
+        self._job = asyncio.create_task(self._run())
+
+    def stop(self) -> None:
+        if self.running:
+            self._job.cancel()
+
+    def clear(self) -> None:
+        if self.running:
+            raise RuntimeError("stop the agent first")
+        self.task, self.plan, self.steps, self.shots = "", "", [], {}
+
+    def _record(self, shot: bytes | None = None, **step) -> None:
+        if shot:
+            self.shots[len(self.steps)] = shot
+        self.steps.append({"t": time.time(), "shot": bool(shot), **step})
+        self.trace.write(kind="step", **step)
+        log.info("agent: %s", step)
+        action = step.get("action", "")
+        if action == "done":
+            self.task_ctx.succeed()
+        elif action in ("fail", "error", "stopped"):
+            self.task_ctx.fail(
+                str(step.get("reason", action))
+            )
+        elif action == "hiccup":
+            self.task_ctx.transition(
+                TaskState.RECOVER,
+                str(step.get("reason", "执行异常"))
+            )
+
+    async def _ask(self, role: str, llm: LLM, system: str, prompt: str,
+                   temperature: float = 0) -> tuple[str, float, bytes | None]:
+        if not self.screen.live:  # never let the model act blind
+            raise BlindError("lost the phone screen: reconnect Screen Mirroring")
+        self.task_ctx.transition(
+            TaskState.OBSERVE,
+            f"读取当前截图，准备调用 {role}"
+        )
+
+        self.task_ctx.transition(
+            TaskState.PLAN,
+            f"调用 DeepSeek {role} 模型"
+        )
+        frame, started = self.screen.frame, time.time()
+        reply = await llm.chat(system, prompt, frame, temperature=temperature)
+        seconds = round(time.time() - started, 2)
+        self.trace.write(frame, kind="llm", role=role, model=llm.model, prompt=prompt,
+                         reply=reply, seconds=seconds)
+        return reply, seconds, frame
+
+    async def _run(self) -> None:
+        failures = 0
+        try:
+            await self._replan()
+            for _ in range(self.max_steps):
+                try:
+                    if await self._step():
+                        return
+                    failures = 0
+                except BlindError:
+                    raise
+                except Exception as e:  # a bad reply or a dropped link: recover, don't crash
+                    self._record(action="hiccup", reason=str(e)[:300])
+                    board_drop = isinstance(e, DeviceError) and await self.phone.device.wait_connected(15)
+                    failures += 0 if board_drop else 1  # the board came back: not the agent's fault
+                    if failures >= self.max_failures:
+                        self._record(action="fail", reason=f"{failures} errors in a row")
+                        return
+                    await self.screen.settled()
+                    await self._replan(stuck=True)
+            self._record(action="fail", reason="step limit reached")
+        except asyncio.CancelledError:
+            self._record(action="stopped")
+        except Exception as e:  # e.g. the planner itself is unreachable
+            self._record(action="error", reason=repr(e))
+
+    # async def _step(self) -> bool:
+    #     """One see-think-act round (one or more actions). Returns True when the task is over."""
+    #     acts = await self._next_actions()
+    #     seen = acts[0]["_shot"]
+    #     spots = [self._pointer]  # where the pointer was and goes: pointer moves are not screen changes
+    #     stuck = self._repeating(acts[0])
+    #     for i, act in enumerate(acts):
+    #         name = act["action"]
+    #         if name == "replan" or stuck:
+    #             self._record(act.pop("_shot"), **act)
+    #             await self._replan(stuck=stuck)
+    #             return False
+    #         if name not in ("done", "fail"):
+    #             started = time.time()
+    #             await self._do(act)
+    #             act["act_s"] = round(time.time() - started, 2)
+    #             spots += _pointer_path(act)
+    #             self._pointer = spots[-1]
+    #         self._record(act.pop("_shot"), **act)
+    #         if name in ("done", "fail"):
+    #             return True
+    #         following = acts[i + 1]["action"] if i < len(acts) - 1 else None
+    #         if name == "tap" and following in ("type", "key"):  # typing into a field that a missed tap never opened
+    #             await self.screen.settled()
+    #             self.task_ctx.transition(
+    #                 TaskState.VERIFY,
+    #                 "检查输入前的点击是否生效"
+    #             )
+    #             if not vision.changed(seen, self.screen.frame, ignore=tuple(spots)):
+    #                 self.steps[-1]["changed"] = False
+    #                 return False  # skip the rest; the actor looks again
+    #     await self.screen.settled()
+    #     self.task_ctx.transition(
+    #         TaskState.VERIFY,
+    #         "检查执行后的屏幕变化"
+    #     )
+    #     # feedback for the next round
+    #     self.steps[-1]["changed"] = vision.changed(seen, self.screen.frame, ignore=tuple(spots))
+    #     return False
+
+
+    async def _step(self) -> bool:
+        """One see-think-act round. Return True when task is over."""
+
+        acts = await self._next_actions()
+        seen = acts[0]["_shot"]
+
+        spots = [self._pointer]
+        stuck = self._repeating(acts[0])
+
+        for i, act in enumerate(acts):
+            name = act["action"]
+
+            # 保留原有的重复动作检测与重新规划机制
+            if name == "replan" or stuck:
+                self._record(act.pop("_shot"), **act)
+                await self._replan(stuck=stuck)
+                return False
+
+            # 执行动作
+            if name not in ("done", "fail"):
+                started = time.time()
+                await self._do(act)
+                act["act_s"] = round(time.time() - started, 2)
+
+                spots += _pointer_path(act)
+                self._pointer = spots[-1]
+
+            self._record(act.pop("_shot"), **act)
+
+            # 保留原有任务终止逻辑
+            if name in ("done", "fail"):
+                return True
+
+            following = (
+                acts[i + 1]["action"]
+                if i < len(acts) - 1
+                else None
+            )
+
+            # 关键保护：点击输入框后，先确认屏幕有变化
+            if name == "tap" and following in ("type", "key"):
+                await self.screen.settled()
+
+                self.task_ctx.transition(
+                    TaskState.VERIFY,
+                    "检查输入前的点击是否生效"
+                )
+
+                changed = vision.changed(
+                    seen,
+                    self.screen.frame,
+                    ignore=tuple(spots)
+                )
+
+                self.steps[-1]["changed"] = changed
+
+                if not changed:
+                    reason = "输入前点击未产生可检测的屏幕变化"
+
+                    # retry() 负责累计重试次数并检查上限
+                    can_retry = self.task_ctx.retry(reason)
+
+                    if not can_retry:
+                        self.task_ctx.fail(
+                            "输入框点击连续验证失败，停止任务"
+                        )
+                        return True
+
+                    self.task_ctx.transition(
+                        TaskState.RECOVER,
+                        "重新观察屏幕，修正点击位置"
+                    )
+
+                    # 不执行后续 type/key，交给下一轮重新观察
+                    return False
+
+                # 点击验证通过，重置连续失败计数
+                self.task_ctx.retries = 0
+
+        # 本轮动作结束，等待屏幕稳定
+        await self.screen.settled()
+
+        self.task_ctx.transition(
+            TaskState.VERIFY,
+            "检查执行后的屏幕变化"
+        )
+
+        changed = vision.changed(
+            seen,
+            self.screen.frame,
+            ignore=tuple(spots)
+        )
+
+        self.steps[-1]["changed"] = changed
+
+        if changed:
+            self.task_ctx.retries = 0
+
+        # 下一轮重新观察，继续由原有 Agent 规划
+        return False
+
+
+    def _missed(self) -> bool:
+        """The previous round changed nothing on screen, so a tap may have landed off target."""
+        return bool(self.steps) and self.steps[-1].get("changed") is False
+
+    def _repeating(self, act: dict, limit: int = 3) -> bool:
+        """True when the actor picks the same action as its last limit-1 moves and the last one did nothing.
+
+        Repeating a move that still changes the screen (e.g. scrolling down a long list) is progress, not a loop.
+        """
+        moves = [s for s in self.steps if "plan" not in s][-(limit - 1):]
+        return (len(moves) == limit - 1 and all(_key(m) == _key(act) for m in moves)
+                and moves[-1].get("changed") is not True)
+
+    async def _replan(self, stuck: bool = False) -> None:
+        prompt = f"Goal: {self.task}"
+        if stuck:
+            last = self.steps[-1] if self.steps else {}
+            prompt += (f"\n\nThe previous plan got stuck (last event: {last.get('action')} {last.get('reason', '')}):"
+                       f"\n{self.plan}\nLook at the current screen and plan from here, another way if needed.")
+        reply, seconds, frame = await self._ask("planner", self.planner, PLANNER_PROMPT, prompt)
+        self.plan, plan_zh = parse_plan(reply)
+        self._record(frame, action="replan (stuck)" if stuck else "plan", plan=self.plan, plan_zh=plan_zh,
+                     think_s=seconds)
+
+    async def _next_actions(self) -> list[dict]:
+        # actions and their effect only: echoing earlier thoughts makes the model repeat them instead of looking
+        hidden = ("t", "plan", "plan_zh", "think_s", "act_s", "shot", "thought", "thought_zh", "changed")
+        effect = {True: " -> screen changed", False: " -> screen did NOT change"}
+        history = "\n".join(json.dumps({k: v for k, v in s.items() if k not in hidden})[:300]
+                            + effect.get(s.get("changed"), "")
+                            for s in self.steps[-8:] if "plan" not in s) or "(none)"
+        prompt = f"Goal: {self.task}\n\nPlan:\n{self.plan}\n\nRecent actions:\n{history}\n\nNext action?"
+        for attempt in range(3):  # retry unparseable replies, a little less deterministically
+            reply, seconds, frame = await self._ask("actor", self.actor, ACTOR_PROMPT, prompt, 0.4 * attempt)
+            try:
+                acts = parse_actions(reply)
+            except ValueError as e:
+                log.warning("unparseable actor reply (%s): %s", e, reply[:200])
+                continue
+            if self._missed() and _key(acts[0]) == _key(self.steps[-1]):  # same move that just did nothing
+                log.info("actor repeated an action that changed nothing; asking for another")
+                prompt += (f"\n\nYou just proposed {json.dumps(_key(acts[0]))} again, but it changed nothing last "
+                           "time. Choose a different action (another position, a shorter swipe, or another way).")
+                continue
+            acts[0]["think_s"] = seconds
+            return [{**a, "_shot": frame} for a in acts]  # every action is drawn on the same screenshot
+        raise ValueError(f"actor gave no valid action: {reply[:200]}")
+
+    async def _do(self, a: dict) -> None:
+        self.task_ctx.transition(
+            TaskState.ACT,
+            f"执行操作：{a['action']}"
+        )
+        p = lambda k: a[k] / 1000  # noqa: E731
+        match a["action"]:
+            case "tap": await self.phone.tap(p("x"), p("y"), aim=True)
+            case "swipe": await self.phone.swipe(p("x1"), p("y1"), p("x2"), p("y2"))
+            case "path": await self.phone.drag([(x / 1000, y / 1000) for x, y in a["points"]])
+            case "circle": await self.phone.drag(circle(p("x"), p("y"), p("r"), self.screen.aspect))
+            case "type": await self.phone.type(a["text"])
+            case "key": await self.phone.key(a["combo"])
+            case "home": await self.phone.go_home()
+            case "back": await self.phone.go_back()
+            case "wait": pass
+            case other: raise ValueError(f"unknown action {other!r}")
+
+
+def _pointer_path(act: dict) -> list[tuple[float, float]]:
+    """Screen points (fractions) the pointer passes through for one action."""
+    f = lambda x, y: (x / 1000, y / 1000)  # noqa: E731
+    match act["action"]:
+        case "tap": return [f(act["x"], act["y"])]
+        case "swipe": return [f(act["x1"], act["y1"]), f(act["x2"], act["y2"])]
+        case "path": return [f(*p) for p in act["points"]]
+        case "circle": return [f(act["x"] + act["r"], act["y"])]
+        case "home": return [(0.5, 0.995), (0.5, 0.6)]
+        case "back": return [(0.005, 0.45), (0.6, 0.45)]
+        case _: return []
+
+
+def circle(x: float, y: float, r: float, aspect: float, n: int = 24) -> list[tuple[float, float]]:
+    """Points around a circle; r is a fraction of the width, aspect = width / height."""
+    return [(x + r * math.cos(2 * math.pi * i / n), y + r * aspect * math.sin(2 * math.pi * i / n))
+            for i in range(n + 1)]
