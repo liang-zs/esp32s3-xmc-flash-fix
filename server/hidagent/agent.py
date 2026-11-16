@@ -13,7 +13,7 @@ from .device import DeviceError
 from .llm import LLM
 from .phone import Phone
 from .screen import Screen
-from .task_state import TaskContext, TaskState
+from .task_state import Recovery, TaskContext, TaskState
 
 log = logging.getLogger(__name__)
 
@@ -575,7 +575,8 @@ then observe the next screenshot before continuing.
 
 
 
-META = ("t", "thought", "thought_zh", "think_s", "act_s", "shot", "_shot", "changed")  # not part of the action
+META = ("t", "thought", "thought_zh", "think_s", "act_s", "shot", "_shot", "changed",
+        "recovery")  # not part of the action
 
 # action name -> argument names; numeric arguments are 0-1000 screen coordinates
 ACTIONS = {"tap": ("x", "y"), "swipe": ("x1", "y1", "x2", "y2"), "circle": ("x", "y", "r"), "path": ("points",),
@@ -641,6 +642,8 @@ class Agent:
         self.task, self.plan, self.steps = "", "", []
         self.shots: dict[int, bytes] = {}  # step index -> screenshot the model decided on
         self._pointer = (0.0, 0.0)  # last pointer position (screen fractions)
+        # 构造时就有状态机：未 start() 时 UI / 测试也能读到状态，start() 会再重置一次
+        self.task_ctx = TaskContext(task_name="")
         self._job: asyncio.Task | None = None
 
     @property
@@ -666,6 +669,7 @@ class Agent:
         if self.running:
             raise RuntimeError("stop the agent first")
         self.task, self.plan, self.steps, self.shots = "", "", [], {}
+        self.task_ctx = TaskContext(task_name="")  # 清空后 UI 回到 idle
 
     def _record(self, shot: bytes | None = None, **step) -> None:
         if shot:
@@ -830,48 +834,43 @@ class Agent:
                 self.steps[-1]["changed"] = changed
 
                 if not changed:
-                    reason = "输入前点击未产生可检测的屏幕变化"
-
-                    # retry() 负责累计重试次数并检查上限
-                    can_retry = self.task_ctx.retry(reason)
-
-                    if not can_retry:
-                        self.task_ctx.fail(
-                            "输入框点击连续验证失败，停止任务"
-                        )
-                        return True
-
-                    self.task_ctx.transition(
-                        TaskState.RECOVER,
-                        "重新观察屏幕，修正点击位置"
-                    )
-
-                    # 不执行后续 type/key，交给下一轮重新观察
-                    return False
-
-                # 点击验证通过，重置连续失败计数
-                self.task_ctx.retries = 0
+                    # 自动失败检测：状态机决定换动作重试 / 重新规划 / 放弃
+                    return await self._handle_no_change("点击输入框后")
 
         # 本轮动作结束，等待屏幕稳定
         await self.screen.settled()
 
         self.task_ctx.transition(
             TaskState.VERIFY,
-            "检查执行后的屏幕变化"
+            "检查执行后的屏幕变化",
         )
 
         changed = vision.changed(
             seen,
             self.screen.frame,
-            ignore=tuple(spots)
+            ignore=tuple(spots),
         )
 
         self.steps[-1]["changed"] = changed
 
-        if changed:
-            self.task_ctx.retries = 0
+        if not changed:
+            # 自动失败检测：屏幕没有任何变化，按状态机给出的策略恢复
+            return await self._handle_no_change(self.steps[-1].get("action", "动作"))
 
-        # 下一轮重新观察，继续由原有 Agent 规划
+        self.task_ctx.record_change(True)  # 有进展：清零连败计数
+        return False
+
+
+    async def _handle_no_change(self, what: str) -> bool:
+        """屏幕没有变化：让状态机决定重试 / 重新规划 / 放弃。返回 True 表示任务结束。"""
+        recovery = self.task_ctx.record_change(False, what)
+        self.steps[-1]["recovery"] = recovery.value
+        if recovery is Recovery.ABORT:
+            self._record(action="fail",
+                         reason=f"连续 {self.task_ctx.no_progress} 步屏幕无变化（{what}）")
+            return True
+        if recovery is Recovery.REPLAN:
+            await self._replan(stuck=True)
         return False
 
 
@@ -901,7 +900,8 @@ class Agent:
 
     async def _next_actions(self) -> list[dict]:
         # actions and their effect only: echoing earlier thoughts makes the model repeat them instead of looking
-        hidden = ("t", "plan", "plan_zh", "think_s", "act_s", "shot", "thought", "thought_zh", "changed")
+        hidden = ("t", "plan", "plan_zh", "think_s", "act_s", "shot", "thought", "thought_zh", "changed",
+                  "recovery")
         effect = {True: " -> screen changed", False: " -> screen did NOT change"}
         history = "\n".join(json.dumps({k: v for k, v in s.items() if k not in hidden})[:300]
                             + effect.get(s.get("changed"), "")

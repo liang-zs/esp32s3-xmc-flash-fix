@@ -1,7 +1,7 @@
 
 from dataclasses import dataclass, field
-from enum import Enum
 from datetime import datetime
+from enum import Enum
 
 
 class TaskState(str, Enum):
@@ -17,6 +17,15 @@ class TaskState(str, Enum):
     FAILED = "failed"
 
 
+class Recovery(str, Enum):
+    """一次动作之后，状态机给出的恢复决策。"""
+
+    NONE = "none"        # 有进展，继续
+    RETRY = "retry"      # 换一个动作再试一步
+    REPLAN = "replan"    # 连续无进展，重新规划
+    ABORT = "abort"      # 达到上限，放弃任务
+
+
 @dataclass
 class TaskContext:
     """保存一个任务的执行状态和历史记录"""
@@ -25,6 +34,8 @@ class TaskContext:
     state: TaskState = TaskState.IDLE
     retries: int = 0
     max_retries: int = 2
+    no_progress: int = 0        # 连续「屏幕无变化」的步数
+    max_no_progress: int = 3    # 无变化达到这个步数就放弃
     history: list[dict] = field(default_factory=list)
 
     def transition(self, new_state: TaskState, reason: str = ""):
@@ -65,3 +76,31 @@ class TaskContext:
         )
         return True
 
+    def record_change(self, changed: bool, what: str = "") -> Recovery:
+        """把一步的执行结果喂回状态机，并给出恢复决策。
+
+        有变化就清零连败计数；无变化按 RETRY → REPLAN → ABORT 三级升级。
+        """
+        if changed:
+            self.no_progress = 0
+            self.retries = 0
+            return Recovery.NONE
+
+        self.no_progress += 1
+        if self.no_progress >= self.max_no_progress:
+            return Recovery.ABORT
+        if self.no_progress >= 2:
+            self.transition(TaskState.RECOVER, f"连续 {self.no_progress} 步屏幕无变化，重新规划")
+            return Recovery.REPLAN
+        self.transition(TaskState.RECOVER, f"{what or '动作'}未改变屏幕，换一个动作重试")
+        return Recovery.RETRY
+
+    def snapshot(self) -> dict:
+        """给 Web UI / 测试用的只读快照。"""
+        return {
+            "task": self.task_name,
+            "state": self.state.value,
+            "retries": self.retries,
+            "no_progress": self.no_progress,
+            "history": self.history[-10:],
+        }

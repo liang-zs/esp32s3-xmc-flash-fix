@@ -90,7 +90,8 @@ def status():
     return {"device": device.connected, "screen": screen.live, "calibrated": phone.calibrated,
             "debug": DEBUG, "trace": str(agent.trace.dir or ""), "aspect": round(screen.aspect, 4),
             "models": {"planner": agent.planner.model, "actor": agent.actor.model},
-            "agent": {"running": agent.running, "task": agent.task, "steps": agent.steps}}
+            "agent": {"running": agent.running, "task": agent.task,
+                      "state": agent.task_ctx.snapshot(), "steps": agent.steps}}
 
 
 @app.get("/api/frame.jpg")
