@@ -25,6 +25,7 @@ HOLD = 0.25             # seconds to rest before lifting, so iOS adds no momentu
 TAP_GAP = 0.15          # seconds to stay still after a click, so iOS sees a finished tap, not the start of a drag
 NUDGE = 12              # mouse units the pointer is wiggled by to find it on screen
 AIM_TOLERANCE = 0.008   # screen fraction; a bigger miss is corrected before pressing
+AIM_ROUNDS = 3          # find-and-correct rounds before pressing anyway (each correction is a move that can miss too)
 MAX_MISS = 0.06         # bigger misses are still corrected, but not learned from (they may be misreadings)
 
 
@@ -85,14 +86,7 @@ class Phone:
     async def _find_pointer(self) -> tuple[float, float] | None:
         """Wiggle the pointer and find it anywhere on screen (the span may still be unknown)."""
         await self.screen.settled(quiet=0.2, least=0.3, most=1.5)
-        before, sent = self.screen.frame, time.time()
-        await self.device.send(f"move {NUDGE} 0")
-        after = await self.screen.fresh(sent, 1.0)
-        if after:
-            await self.screen.settled(quiet=0.15, least=0.1, most=0.6)
-            after = self.screen.frame
-        await self.device.send(f"move -{NUDGE} 0")
-        found = before and after and vision.pointer(before, after, (0.5, 0.5), 0.025, reach=(0.5, 0.5))
+        found = await self._spot(NUDGE, 0.025, None, wait=1.0)
         return found if found and 0.03 < found[0] < 0.97 and 0.03 < found[1] < 0.97 else None
 
     def finish_calibration(self, x: float, y: float) -> None:
@@ -109,44 +103,77 @@ class Phone:
     async def point(self, x: float, y: float, aim: bool = False) -> None:
         if not self.calibrated:
             raise RuntimeError("pointer not calibrated")
+        aim = aim and self.screen is not None
+        if aim:  # start from the corner: iOS pointer motion depends on the path (acceleration), so a precise
+            self._moves = REHOME_EVERY  # move is only repeatable, and its error learnable, from a known start
         await self._move_to(self._dx(x), self._dy(y))
-        if aim and self.screen is not None:
+        if aim:
             await self._aim(x, y)
 
+    async def locate(self, x: float, y: float, fix: bool = True, aim: bool = False) -> tuple[float, float] | None:
+        """Debug: move to (x, y) without clicking and return where the pointer really is.
+        fix=False skips the learned correction, to measure the raw calibration; aim=True measures after the
+        closed-loop correction a precise tap does."""
+        if not self.calibrated or self.screen is None:
+            raise RuntimeError("pointer not calibrated or no screen")
+        if aim:
+            await self.point(x, y, aim=True)
+            nudge = NUDGE if x < 0.9 else -NUDGE
+            return await self._spot(nudge, nudge / self.span["w"], (x, y))
+        tx = round(min(max(self._fix(x, "x") if fix else x, 0), 1) * self.span["w"])
+        ty = round(min(max(self._fix(y, "y") if fix else y, 0), 1) * self.span["h"])
+        self._moves = REHOME_EVERY  # from the corner, like a precise tap
+        await self._move_to(tx, ty)
+        nudge = NUDGE if x < 0.9 else -NUDGE
+        return await self._spot(nudge, nudge / self.span["w"], (x, y))
+
+    async def _spot(self, nudge: int, shift: float, near: tuple[float, float] | None,
+                    wait: float = 0.6) -> tuple[float, float] | None:
+        """Wiggle the pointer right and back and find it from the two frames after each move.
+
+        Both moves just happened, so the pointer shows in both frames (iOS hides it once it rests, so a frame
+        taken before the wiggle may have none). Each frame is taken once the screen settles after a move: on a
+        screen with an animation a new frame arrives every second anyway, and that one may predate the move.
+        near=None searches the whole screen.
+        """
+        frames = []
+        for step in (nudge, -nudge):
+            sent = time.time()
+            await self.device.send(f"move {step} 0")
+            if not await self.screen.fresh(sent, wait):
+                return None
+            await self.screen.settled(quiet=0.15, least=0.25, most=0.8)
+            frames.append(self.screen.frame)
+        after, back = frames
+        if near is not None:
+            found = vision.pointer(back, after, near, shift)
+            if found:
+                return found
+        return vision.pointer(back, after, (0.5, 0.5), shift, reach=(0.5, 0.5))
+
     async def _aim(self, x: float, y: float) -> None:
-        """Closed loop: find the real pointer on screen, fix a miss, and learn the error for later moves."""
+        """Closed loop: find the real pointer on screen and fix a miss until it is on target (AIM_ROUNDS at most).
+
+        The first landing, straight from the corner, is learned so later moves start closer.
+        """
         nudge = NUDGE if x < 0.9 else -NUDGE  # stay clear of the screen edge
-        await self.screen.settled(quiet=0.15, least=0.1, most=0.6)  # pointer at rest
-        before, sent = self.screen.frame, time.time()
-        await self.device.send(f"move {nudge} 0")
-        after = await self.screen.fresh(sent, 0.6)
-        if after:
-            await self.screen.settled(quiet=0.1, least=0.05, most=0.4)
-            after = self.screen.frame
-        await self.device.send(f"move {-nudge} 0")
-        shift = nudge / self.span["w"]
-        found = before and after and (vision.pointer(before, after, (x, y), shift)  # near the target first,
-                                      or vision.pointer(before, after, (0.5, 0.5), shift, reach=(0.5, 0.5)))  # anywhere
-        if not found:
-            log.warning("aim (%.3f, %.3f): pointer not found (%s)", x, y,
-                      "no new frame after the nudge" if not after else "no pointer-sized change near the target")
-            return
-        fx, fy = found
-        #log.debug("aim (%.3f, %.3f): pointer at (%.3f, %.3f)", x, y, fx, fy)
-        log.warning(
-            "[AIM] target=(%.3f, %.3f), found=(%.3f, %.3f), "
-            "error=(%+.3f, %+.3f), span=%s",
-            x, y, fx, fy, fx - x, fy - y, self.span
-            )
-        if max(abs(fx - x), abs(fy - y)) <= MAX_MISS:  # learn from normal drift only, never from a stray reading
-            self._seen["x"].append((self._fix(x, "x"), fx))
-            self._seen["y"].append((self._fix(y, "y"), fy))
-            self._save()
-        if abs(fx - x) <= AIM_TOLERANCE and abs(fy - y) <= AIM_TOLERANCE:
-            return
-        dx, dy = round((x - fx) * self.span["w"]), round((y - fy) * self.span["h"])  # fix this miss right away
-        await self.device.send(f"move {dx} {dy}")
-        self._pos = (self._pos[0] + dx, self._pos[1] + dy)
+        for round_ in range(AIM_ROUNDS):
+            found = await self._spot(nudge, nudge / self.span["w"], (x, y))  # near the target first, then anywhere
+            if not found:
+                log.warning("aim (%.3f, %.3f) round %d: pointer not found", x, y, round_ + 1)
+                return
+            fx, fy = found
+            log.info("aim (%.3f, %.3f) round %d: pointer at (%.3f, %.3f), error (%+.3f, %+.3f)",
+                     x, y, round_ + 1, fx, fy, fx - x, fy - y)
+            if round_ == 0 and max(abs(fx - x), abs(fy - y)) <= MAX_MISS:  # learn normal drift, not a misreading
+                self._seen["x"].append((self._fix(x, "x"), fx))
+                self._seen["y"].append((self._fix(y, "y"), fy))
+                self._save()
+            if abs(fx - x) <= AIM_TOLERANCE and abs(fy - y) <= AIM_TOLERANCE:
+                return
+            dx, dy = round((x - fx) * self.span["w"]), round((y - fy) * self.span["h"])
+            await self.device.send(f"move {dx} {dy}")
+            self._pos = (self._pos[0] + dx, self._pos[1] + dy)
 
     def _fix(self, t: float, axis: str) -> float:
         """The fraction to aim at so the pointer lands on t, from the line through the observed landings."""

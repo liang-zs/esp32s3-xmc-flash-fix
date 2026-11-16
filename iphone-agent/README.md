@@ -12,7 +12,7 @@ user-reported tests.
 | Symptom | Observed outcome / approach |
 | --- | --- |
 | App not on visible Home Screen | Navigate to Home, then use Spotlight |
-| Home swipe failed on an iPhone 18 Pro | AssistiveTouch floating button configured to return Home on single tap |
+| Home swipe failed on an iPhone 11 | AssistiveTouch floating button configured to return Home on single tap |
 | `cmd+space` worked on Home, failed in Settings | Do not rely on shortcut from inside an app |
 | Chinese search for 备忘录 failed on English iOS | Search for `Notes`; similarly 设置 -> `Settings` |
 | Tap on Spotlight app result missed | Enable `aim=True` for all taps |

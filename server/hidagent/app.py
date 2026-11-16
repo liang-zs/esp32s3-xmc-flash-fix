@@ -91,7 +91,8 @@ def status():
             "debug": DEBUG, "trace": str(agent.trace.dir or ""), "aspect": round(screen.aspect, 4),
             "models": {"planner": agent.planner.model, "actor": agent.actor.model},
             "agent": {"running": agent.running, "task": agent.task,
-                      "state": agent.task_ctx.snapshot(), "steps": agent.steps}}
+                      "state": agent.task_ctx.snapshot(), "steps": agent.steps,
+                      "progress": {"completed": agent.completed, "plan_step": agent.plan_step}}}
 
 
 @app.get("/api/frame.jpg")
@@ -191,6 +192,27 @@ def agent_clear():
     except RuntimeError as e:
         raise HTTPException(409, str(e)) from e
     return {"ok": True}
+
+class Locate(BaseModel):
+    x: float
+    y: float
+    fix: bool = True
+    aim: bool = False
+
+
+@app.post("/api/debug/locate")
+async def debug_locate(p: Locate):
+    """Debug only: move the pointer to (x, y) without clicking and report where it really landed."""
+    if not DEBUG:
+        raise HTTPException(404)
+    if agent.running:
+        raise HTTPException(409, "stop agent before testing")
+    try:
+        found = await phone.locate(p.x, p.y, p.fix, p.aim)
+    except (DeviceError, RuntimeError) as e:
+        raise HTTPException(409, str(e)) from e
+    return {"target": [p.x, p.y], "found": list(found) if found else None}
+
 
 @app.post("/api/debug/pointer-frames")
 async def debug_pointer_frames():

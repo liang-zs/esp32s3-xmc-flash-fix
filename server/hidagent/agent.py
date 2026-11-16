@@ -43,7 +43,7 @@ To open an app, prefer search over paging through home screens: tap the "Search"
 the dock (or swipe down from the middle of the home screen), type the app name, tap the result."""
 
 
-ACTOR_PROMPT = """You are an AI agent controlling a real iPhone 18 Pro
+ACTOR_PROMPT = """You are an AI agent controlling a real iPhone 11
 through an ESP32-S3 USB HID mouse and keyboard.
 
 You receive screenshots of the actual iPhone screen.
@@ -61,15 +61,27 @@ You must follow these rules carefully.
 
 Reply in exactly this format:
 
+STEP: <number of the plan step this action works on>
 THINK: <Briefly describe what is visible, whether the previous
 action succeeded, and why you chose the next action.>
 DO: <exactly one supported action>
 
 Example:
 
+STEP: 3
 THINK: Spotlight is open, but the search field may not have focus.
 I will tap the center of the search field before typing.
 DO: tap 480 120 precise
+
+PLAN PROGRESS:
+- The plan you receive marks each step [done], [now] or [todo].
+- [done] steps and the "Already completed" list were verified on
+  earlier screens. NEVER redo them, even if the current screen
+  (e.g. the Home Screen) looks like the start of the task.
+- Seeing the Home Screen after a [done] "return to Home" step means
+  you should continue with the NEXT step, not start over.
+- Report STEP as the step you are working on now. Move it forward
+  only once the screenshot confirms the previous step is finished.
 
 IMPORTANT:
 - Output exactly ONE DO line per response.
@@ -109,7 +121,7 @@ DO: tap X Y precise
 3. DEVICE-SPECIFIC NAVIGATION
 ==================================================
 
-This device is an iPhone 18 Pro.
+This device is an iPhone 11.
 
 The physical connection uses an ESP32-S3 USB HID mouse
 and keyboard.
@@ -576,7 +588,7 @@ then observe the next screenshot before continuing.
 
 
 META = ("t", "thought", "thought_zh", "think_s", "act_s", "shot", "_shot", "changed",
-        "recovery")  # not part of the action
+        "recovery", "step")  # not part of the action
 
 # action name -> argument names; numeric arguments are 0-1000 screen coordinates
 ACTIONS = {"tap": ("x", "y"), "swipe": ("x1", "y1", "x2", "y2"), "circle": ("x", "y", "r"), "path": ("points",),
@@ -615,6 +627,9 @@ def parse_actions(text: str) -> list[dict]:
     if not acts:
         raise ValueError(f"no DO line in reply: {text[:200]}")
     acts[0] = {"thought": thought.group(1) if thought else "", "thought_zh": zh.group(1) if zh else "", **acts[0]}
+    step = re.search(r"^\s*STEP\s*[:：]\s*(\d+)", text, re.M | re.I)
+    if step:
+        acts[0]["step"] = int(step.group(1))
     return acts
 
 
@@ -622,6 +637,11 @@ def parse_plan(text: str) -> tuple[str, str]:
     """Split an optional EN: / ZH: plan reply; a plain reply is used for both."""
     m = re.search(r"EN\s*[:：](.*?)ZH\s*[:：](.*)", text, re.S | re.I)
     return (m.group(1).strip(), m.group(2).strip()) if m else (text.strip(), text.strip())
+
+
+def plan_steps(plan: str) -> list[str]:
+    """The numbered lines of a plan: "1. Tap Settings\\n2) Tap General" -> ["Tap Settings", "Tap General"]."""
+    return [m.group(1) for m in re.finditer(r"^\s*\d+\s*[.)、:]\s*(.+?)\s*$", plan, re.M)]
 
 
 def _key(step: dict) -> dict:
@@ -640,6 +660,8 @@ class Agent:
         self.trace = trace
         self.max_steps, self.max_failures = max_steps, max_failures
         self.task, self.plan, self.steps = "", "", []
+        self.completed: list[str] = []  # plan steps finished so far; survives replans
+        self.plan_step = 1  # 1-based step of the current plan being worked on; only moves forward
         self.shots: dict[int, bytes] = {}  # step index -> screenshot the model decided on
         self._pointer = (0.0, 0.0)  # last pointer position (screen fractions)
         # 构造时就有状态机：未 start() 时 UI / 测试也能读到状态，start() 会再重置一次
@@ -656,6 +678,7 @@ class Agent:
         if not self.screen.live:
             raise RuntimeError("no phone screen: start Screen Mirroring first")
         self.task, self.plan, self.steps, self.shots = task, "", [], {}
+        self.completed, self.plan_step = [], 1
         self._pointer = (0.0, 0.0)
         self.task_ctx = TaskContext(task_name=task)
         self.trace.start(task)
@@ -669,6 +692,7 @@ class Agent:
         if self.running:
             raise RuntimeError("stop the agent first")
         self.task, self.plan, self.steps, self.shots = "", "", [], {}
+        self.completed, self.plan_step = [], 1
         self.task_ctx = TaskContext(task_name="")  # 清空后 UI 回到 idle
 
     def _record(self, shot: bytes | None = None, **step) -> None:
@@ -781,7 +805,10 @@ class Agent:
         """One see-think-act round. Return True when task is over."""
 
         acts = await self._next_actions()
+        self._advance(acts[0].get("step"))
         seen = acts[0]["_shot"]
+        # the screen while the model was thinking: whatever moved since `seen` is animation, not our doing
+        idle = self.screen.frame
 
         spots = [self._pointer]
         stuck = self._repeating(acts[0])
@@ -828,7 +855,8 @@ class Agent:
                 changed = vision.changed(
                     seen,
                     self.screen.frame,
-                    ignore=tuple(spots)
+                    ignore=tuple(spots),
+                    idle=idle,
                 )
 
                 self.steps[-1]["changed"] = changed
@@ -849,6 +877,7 @@ class Agent:
             seen,
             self.screen.frame,
             ignore=tuple(spots),
+            idle=idle,
         )
 
         self.steps[-1]["changed"] = changed
@@ -887,26 +916,53 @@ class Agent:
         return (len(moves) == limit - 1 and all(_key(m) == _key(act) for m in moves)
                 and moves[-1].get("changed") is not True)
 
+    def _advance(self, step: int | None) -> None:
+        """The actor works on plan step `step`: every earlier step is finished. Progress never goes back,
+        so a familiar screen (e.g. Home after "return to Home") can't send the agent back to step 1."""
+        steps = plan_steps(self.plan)
+        if not step or not steps:
+            return
+        step = min(step, len(steps))
+        if step > self.plan_step:
+            self.completed += steps[self.plan_step - 1:step - 1]
+            self.plan_step = step
+
+    def _progress(self) -> str:
+        """The plan with [done] / [now] / [todo] marks, plus what earlier plans already finished."""
+        steps = plan_steps(self.plan)
+        if not steps:
+            plan = self.plan
+        else:
+            mark = lambda i: "[done]" if i < self.plan_step else "[now]" if i == self.plan_step else "[todo]"  # noqa: E731
+            plan = "\n".join(f"{i}. {mark(i)} {s}" for i, s in enumerate(steps, 1))
+        done = "".join(f"\n- {s}" for s in self.completed)
+        return (f"Already completed (verified earlier, NEVER redo):{done}\n\n" if done else "") + f"Plan:\n{plan}"
+
     async def _replan(self, stuck: bool = False) -> None:
         prompt = f"Goal: {self.task}"
+        if self.completed:
+            prompt += ("\n\nAlready completed (verified, do NOT plan these again; plan only the remaining work):"
+                       + "".join(f"\n- {s}" for s in self.completed))
         if stuck:
             last = self.steps[-1] if self.steps else {}
             prompt += (f"\n\nThe previous plan got stuck (last event: {last.get('action')} {last.get('reason', '')}):"
                        f"\n{self.plan}\nLook at the current screen and plan from here, another way if needed.")
         reply, seconds, frame = await self._ask("planner", self.planner, PLANNER_PROMPT, prompt)
         self.plan, plan_zh = parse_plan(reply)
+        self.plan_step = 1  # a new plan covers only what is left
         self._record(frame, action="replan (stuck)" if stuck else "plan", plan=self.plan, plan_zh=plan_zh,
                      think_s=seconds)
 
     async def _next_actions(self) -> list[dict]:
         # actions and their effect only: echoing earlier thoughts makes the model repeat them instead of looking
         hidden = ("t", "plan", "plan_zh", "think_s", "act_s", "shot", "thought", "thought_zh", "changed",
-                  "recovery")
+                  "recovery", "step")
         effect = {True: " -> screen changed", False: " -> screen did NOT change"}
         history = "\n".join(json.dumps({k: v for k, v in s.items() if k not in hidden})[:300]
                             + effect.get(s.get("changed"), "")
                             for s in self.steps[-8:] if "plan" not in s) or "(none)"
-        prompt = f"Goal: {self.task}\n\nPlan:\n{self.plan}\n\nRecent actions:\n{history}\n\nNext action?"
+        prompt = (f"Goal: {self.task}\n\n{self._progress()}\n\nRecent actions:\n{history}\n\n"
+                  "Next action? Start with STEP: <the plan step you are working on>.")
         for attempt in range(3):  # retry unparseable replies, a little less deterministically
             reply, seconds, frame = await self._ask("actor", self.actor, ACTOR_PROMPT, prompt, 0.4 * attempt)
             try:

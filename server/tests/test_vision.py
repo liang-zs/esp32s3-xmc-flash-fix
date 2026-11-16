@@ -72,3 +72,52 @@ def test_pointer_far_from_the_target_is_found_with_a_full_screen_search():
     assert pointer(before, after, near=(0.9, 0.1), shift=12 / W) is None  # outside the window near the target
     found = pointer(before, after, near=(0.5, 0.5), shift=12 / W, reach=(0.5, 0.5))
     assert found[0] * W == pytest.approx(354, abs=3) and found[1] * H == pytest.approx(136, abs=3)
+
+
+def clock_screen(pointer_at=None, hand=0) -> bytes:
+    """Home screen with an animated icon: a second hand that ticks on its own (the Clock app icon)."""
+    import math
+
+    img = Image.open(io.BytesIO(screen(pointer_at))).convert("RGB")
+    draw = ImageDraw.Draw(img)
+    cx, cy, r = 190, 260, 35
+    draw.ellipse([cx - r, cy - r, cx + r, cy + r], fill=(245, 245, 245))
+    a = math.radians(hand * 6 - 90)
+    draw.line([(cx, cy), (cx + r * math.cos(a), cy + r * math.sin(a))], fill=(230, 80, 20), width=3)
+    buf = io.BytesIO()
+    img.save(buf, "JPEG", quality=75)
+    return buf.getvalue()
+
+
+def test_animated_icon_is_not_mistaken_for_the_pointer():
+    # iPhone 11 run, 2026-11-17: the Clock icon's second hand was read as the pointer, so aim "corrected" taps
+    shift = 12 / W
+    after, back = clock_screen((412, 700), 1), clock_screen((400, 700), 2)  # the hand ticked between the two
+    found = pointer(back, after, (0.5, 0.5), shift, reach=(0.5, 0.5))
+    assert found == pytest.approx((400 / W, 700 / H), abs=0.01)
+
+
+def test_animation_alone_is_not_a_screen_change():
+    # seconds: the model looks at 0, we act at 2, the result is checked at 5
+    seen, idle, after = clock_screen(hand=0), clock_screen(hand=2), clock_screen(hand=5)
+    assert changed(seen, after)  # the second hand moved
+    assert not changed(seen, after, idle=idle)  # ... but it was moving before we acted, too
+
+
+def test_real_change_still_counts_next_to_an_animation():
+    seen, idle = clock_screen(hand=0), clock_screen(hand=2)
+    img = Image.open(io.BytesIO(clock_screen(hand=5))).convert("RGB")
+    ImageDraw.Draw(img).rectangle([150, 700, 350, 800], fill=(250, 250, 250))  # e.g. a sheet slid up
+    buf = io.BytesIO()
+    img.save(buf, "JPEG", quality=75)
+    assert changed(seen, buf.getvalue(), idle=idle)
+
+
+def test_animation_alone_is_not_a_pointer():
+    assert pointer(clock_screen(hand=0), clock_screen(hand=1), (190 / W, 260 / H), 12 / W) is None
+
+
+def test_pointer_hidden_before_the_wiggle_is_still_found_close():
+    # iOS hides a resting pointer: only one of the two frames may show it; the error is at most shift/2
+    found = pointer(screen(), screen((274, 856)), near=(0.5, 0.8), shift=12 / W)
+    assert found is not None and abs(found[0] * W - 262) <= 7 and abs(found[1] * H - 856) <= 3
