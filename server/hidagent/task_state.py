@@ -36,6 +36,10 @@ class TaskContext:
     max_retries: int = 2
     no_progress: int = 0        # 连续「屏幕无变化」的步数
     max_no_progress: int = 3    # 无变化达到这个步数就放弃
+    rounds_on_step: int = 0     # 当前计划步骤已经执行的轮数（屏幕在变也算）
+    max_rounds_per_step: int = 8  # 一个步骤超过这么多轮还没完成 = 卡住了（比如进错页面来回点）
+    stalls: int = 0             # 因卡在步骤上而重新规划的次数（完成一个步骤清零）
+    max_stalls: int = 2         # 第二次卡住就放弃
     history: list[dict] = field(default_factory=list)
 
     def transition(self, new_state: TaskState, reason: str = ""):
@@ -95,6 +99,26 @@ class TaskContext:
         self.transition(TaskState.RECOVER, f"{what or '动作'}未改变屏幕，换一个动作重试")
         return Recovery.RETRY
 
+    def record_round(self, progressed: bool, step: str = "") -> Recovery:
+        """每一轮结束时调用：计划步骤是否向前推进了。
+
+        屏幕在变但步骤一直不完成（进错页面、来回点同一个地方），record_change 看不出来，
+        这里按轮数兜底：超过 max_rounds_per_step 轮 → REPLAN，第 max_stalls 次 → ABORT。
+        """
+        if progressed:
+            self.rounds_on_step = self.stalls = 0
+            return Recovery.NONE
+        self.rounds_on_step += 1
+        if self.rounds_on_step < self.max_rounds_per_step:
+            return Recovery.NONE
+        self.rounds_on_step = 0
+        self.stalls += 1
+        if self.stalls >= self.max_stalls:
+            return Recovery.ABORT
+        self.transition(TaskState.RECOVER,
+                        f"步骤「{step or '当前步骤'}」执行了 {self.max_rounds_per_step} 轮仍未完成，重新规划")
+        return Recovery.REPLAN
+
     def snapshot(self) -> dict:
         """给 Web UI / 测试用的只读快照。"""
         return {
@@ -102,5 +126,7 @@ class TaskContext:
             "state": self.state.value,
             "retries": self.retries,
             "no_progress": self.no_progress,
+            "rounds_on_step": self.rounds_on_step,
+            "stalls": self.stalls,
             "history": self.history[-10:],
         }

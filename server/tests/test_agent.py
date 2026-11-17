@@ -92,3 +92,16 @@ def test_repeating_a_move_that_keeps_changing_the_screen_is_not_stuck():
 def test_precise_tap_flag():
     assert parse_command("tap 120 640 precise") == {"action": "tap", "x": 120, "y": 640, "precise": True}
     assert "precise" not in parse_command("tap 120 640")
+
+
+def test_chinese_goes_through_pinyin_not_type():
+    # iPhone 11, 2026-11-17: "type 长安姑娘" came out as "9j;5952f53m" in bilibili search
+    import pytest
+
+    from hidagent.agent import parse_command
+    with pytest.raises(ValueError, match="pinyin"):
+        parse_command("type 长安姑娘")
+    assert parse_command("pinyin chang'an gu niang") == {"action": "pinyin", "text": "changanguniang"}
+    assert parse_command("pinyin nü") == {"action": "pinyin", "text": "nv"}
+    with pytest.raises(ValueError, match="letters only"):
+        parse_command("pinyin 长安")

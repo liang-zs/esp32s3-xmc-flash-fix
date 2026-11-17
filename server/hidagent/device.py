@@ -19,6 +19,9 @@ class Device:
         self._lock = asyncio.Lock()
         self._last = self._beat = 0.0
         self.links = 0  # bumped on every (re)connect, so gestures know to release and re-home
+        # for /api/status: lets a dead link be told apart from a board that never connected
+        self.peer, self.hello, self.since = "", "", 0.0  # current link: board address, greeting, connect time
+        self.lost_at, self.lost_reason = 0.0, ""          # last time a link died, and why
 
     @property
     def connected(self) -> bool:
@@ -35,10 +38,24 @@ class Device:
             hello = ""
         if self.connected:
             self._writer.close()
+            self._lost("replaced by a new connection")
         self._reader, self._writer = reader, writer
         self.links += 1
-        self._last = self._beat = time.time()  # fresh link: nothing to keep awake yet
+        self._last = self._beat = self.since = time.time()  # fresh link: nothing to keep awake yet
+        peer = writer.get_extra_info("peername")
+        self.peer, self.hello = (f"{peer[0]}:{peer[1]}" if peer else ""), hello
         log.info("board connected from %s %s", writer.get_extra_info("peername"), hello)
+
+    def _lost(self, reason: str) -> None:
+        self.lost_at, self.lost_reason = time.time(), reason
+        log.info("board link lost: %s", reason)
+
+    def info(self) -> dict:
+        """Link details for the status page; times are seconds ago (None = never)."""
+        ago = lambda t: round(time.time() - t, 1) if t else None  # noqa: E731
+        return {"connected": self.connected, "links": self.links, "peer": self.peer, "hello": self.hello,
+                "connected_for": ago(self.since) if self.connected else None,
+                "lost_ago": ago(self.lost_at), "lost_reason": self.lost_reason}
 
     async def wait_connected(self, timeout: float) -> bool:
         deadline = time.time() + timeout
@@ -71,6 +88,7 @@ class Device:
                 reply = (await asyncio.wait_for(self._reader.readline(), timeout)).decode().strip()
             except (OSError, asyncio.TimeoutError) as e:
                 self._writer.close()  # the board reconnects on its own within a few seconds
+                self._lost(f"'{command[:30]}': {e!r}")
                 raise DeviceError(f"board link lost during '{command[:30]}': {e!r}") from e
         self._beat = time.time()  # last reply of any kind
         if command != "ping":

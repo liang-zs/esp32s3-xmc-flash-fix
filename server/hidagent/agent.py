@@ -536,6 +536,7 @@ swipe X1 Y1 X2 Y2
 path X1 Y1 X2 Y2 X3 Y3 ...
 circle X Y R
 type TEXT
+pinyin LETTERS
 key COMBO
 home
 back
@@ -543,6 +544,14 @@ wait
 replan
 done ANSWER
 fail REASON
+
+CHINESE TEXT:
+"type" sends ASCII keys only; Chinese characters typed with it come out as garbage.
+To enter Chinese, use "pinyin" with the toneless pinyin letters of the whole phrase, e.g.
+长安姑娘 -> DO: pinyin changanguniang (ü is v: 女 -> nv). It switches to the Chinese
+keyboard, types the letters, picks the first candidate and switches back.
+Then check the field: if a wrong word was picked, clear it and try a shorter phrase.
+Search terms that are English words or app names still use "type".
 
 NOTE:
 Although "home" is recognized by the software,
@@ -592,7 +601,7 @@ META = ("t", "thought", "thought_zh", "think_s", "act_s", "shot", "_shot", "chan
 
 # action name -> argument names; numeric arguments are 0-1000 screen coordinates
 ACTIONS = {"tap": ("x", "y"), "swipe": ("x1", "y1", "x2", "y2"), "circle": ("x", "y", "r"), "path": ("points",),
-           "type": ("text",), "key": ("combo",), "done": ("answer",), "fail": ("reason",),
+           "type": ("text",), "pinyin": ("text",), "key": ("combo",), "done": ("answer",), "fail": ("reason",),
            "home": (), "back": (), "wait": (), "replan": ()}
 TEXT_ARGS = ("text", "combo", "answer", "reason")
 
@@ -605,7 +614,16 @@ def parse_command(line: str) -> dict:
         raise ValueError(f"unknown action: {line[:100]}")
     keys = ACTIONS[name]
     if keys and keys[0] in TEXT_ARGS:
-        return {"action": name, keys[0]: rest.strip().strip('"')}
+        text = rest.strip().strip('"')
+        if name == "type" and not text.isascii():  # the board types ASCII keys only: Chinese came out as garbage
+            raise ValueError(f"type sends ASCII only, it cannot enter {text[:20]!r}. For Chinese use the pinyin "
+                             "action with the pinyin letters, e.g. 长安姑娘 -> DO: pinyin changanguniang")
+        if name == "pinyin":
+            text = text.lower().replace("ü", "v").replace("u:", "v")
+            text = re.sub(r"[\s'’]", "", text)  # a space would commit a candidate halfway
+            if not re.fullmatch(r"[a-z]+", text):
+                raise ValueError(f"pinyin takes letters only (no tones or Chinese characters): {rest[:60]!r}")
+        return {"action": name, keys[0]: text}
     numbers = [int(float(n)) for n in re.findall(r"-?\d+(?:\.\d+)?", rest)]
     if keys == ("points",):
         if len(numbers) < 4 or len(numbers) % 2:
@@ -655,10 +673,11 @@ class BlindError(RuntimeError):
 
 class Agent:
     def __init__(self, phone: Phone, screen: Screen, actor: LLM, planner: LLM, trace: Trace,
-                 max_steps: int = 40, max_failures: int = 3):
+                 max_steps: int = 40, max_failures: int = 3, max_seconds: float = 300):
         self.phone, self.screen, self.actor, self.planner = phone, screen, actor, planner
         self.trace = trace
         self.max_steps, self.max_failures = max_steps, max_failures
+        self.max_seconds = max_seconds  # whole-task time limit: a hung step or a slow loop can't run forever
         self.task, self.plan, self.steps = "", "", []
         self.completed: list[str] = []  # plan steps finished so far; survives replans
         self.plan_step = 1  # 1-based step of the current plan being worked on; only moves forward
@@ -735,14 +754,16 @@ class Agent:
         return reply, seconds, frame
 
     async def _run(self) -> None:
-        failures = 0
+        failures, deadline = 0, time.time() + self.max_seconds
         try:
             await self._replan()
             for _ in range(self.max_steps):
                 try:
-                    if await self._step():
+                    if await asyncio.wait_for(self._step(), max(deadline - time.time(), 0.01)):
                         return
                     failures = 0
+                except asyncio.TimeoutError:
+                    raise
                 except BlindError:
                     raise
                 except Exception as e:  # a bad reply or a dropped link: recover, don't crash
@@ -754,58 +775,34 @@ class Agent:
                         return
                     await self.screen.settled()
                     await self._replan(stuck=True)
+                if time.time() >= deadline:
+                    raise asyncio.TimeoutError
             self._record(action="fail", reason="step limit reached")
+        except asyncio.TimeoutError:
+            self._record(action="fail", reason=f"time limit reached ({self.max_seconds:.0f} s)")
+            await self._release()
         except asyncio.CancelledError:
             self._record(action="stopped")
         except Exception as e:  # e.g. the planner itself is unreachable
             self._record(action="error", reason=repr(e))
 
-    # async def _step(self) -> bool:
-    #     """One see-think-act round (one or more actions). Returns True when the task is over."""
-    #     acts = await self._next_actions()
-    #     seen = acts[0]["_shot"]
-    #     spots = [self._pointer]  # where the pointer was and goes: pointer moves are not screen changes
-    #     stuck = self._repeating(acts[0])
-    #     for i, act in enumerate(acts):
-    #         name = act["action"]
-    #         if name == "replan" or stuck:
-    #             self._record(act.pop("_shot"), **act)
-    #             await self._replan(stuck=stuck)
-    #             return False
-    #         if name not in ("done", "fail"):
-    #             started = time.time()
-    #             await self._do(act)
-    #             act["act_s"] = round(time.time() - started, 2)
-    #             spots += _pointer_path(act)
-    #             self._pointer = spots[-1]
-    #         self._record(act.pop("_shot"), **act)
-    #         if name in ("done", "fail"):
-    #             return True
-    #         following = acts[i + 1]["action"] if i < len(acts) - 1 else None
-    #         if name == "tap" and following in ("type", "key"):  # typing into a field that a missed tap never opened
-    #             await self.screen.settled()
-    #             self.task_ctx.transition(
-    #                 TaskState.VERIFY,
-    #                 "检查输入前的点击是否生效"
-    #             )
-    #             if not vision.changed(seen, self.screen.frame, ignore=tuple(spots)):
-    #                 self.steps[-1]["changed"] = False
-    #                 return False  # skip the rest; the actor looks again
-    #     await self.screen.settled()
-    #     self.task_ctx.transition(
-    #         TaskState.VERIFY,
-    #         "检查执行后的屏幕变化"
-    #     )
-    #     # feedback for the next round
-    #     self.steps[-1]["changed"] = vision.changed(seen, self.screen.frame, ignore=tuple(spots))
-    #     return False
-
+    async def _release(self) -> None:
+        """A step cut off mid-gesture may leave the button down: let go and re-home."""
+        try:
+            if self.phone.device.connected:
+                await self.phone.reset()
+        except Exception as e:  # best effort; the task is over anyway
+            log.warning("release after time limit failed: %s", e)
 
     async def _step(self) -> bool:
         """One see-think-act round. Return True when task is over."""
 
         acts = await self._next_actions()
+        done = len(self.completed)
         self._advance(acts[0].get("step"))
+        stall = await self._check_stall(len(self.completed) > done, acts[0])
+        if stall is not Recovery.NONE:  # ABORT ends the task; after a REPLAN look again before acting
+            return stall is Recovery.ABORT
         seen = acts[0]["_shot"]
         # the screen while the model was thinking: whatever moved since `seen` is animation, not our doing
         idle = self.screen.frame
@@ -903,6 +900,23 @@ class Agent:
         return False
 
 
+    async def _check_stall(self, progressed: bool, act: dict) -> Recovery:
+        """Screen keeps changing but the plan step never finishes (wrong page, tapping around):
+        replan after a while (REPLAN), give up the second time (ABORT, recorded as fail)."""
+        steps = plan_steps(self.plan)
+        current = steps[self.plan_step - 1] if 0 < self.plan_step <= len(steps) else ""
+        recovery = self.task_ctx.record_round(progressed, current)
+        if recovery is Recovery.NONE:
+            return recovery
+        rounds = self.task_ctx.max_rounds_per_step
+        if recovery is Recovery.ABORT:
+            self._record(act.pop("_shot"), action="fail",
+                         reason=f"卡在步骤「{current}」：重新规划后仍然 {rounds} 轮没有完成")
+        else:
+            self._record(act.pop("_shot"), action="stalled", reason=f"步骤「{current}」{rounds} 轮未完成")
+            await self._replan(stuck=True)
+        return recovery
+
     def _missed(self) -> bool:
         """The previous round changed nothing on screen, so a tap may have landed off target."""
         return bool(self.steps) and self.steps[-1].get("changed") is False
@@ -950,6 +964,7 @@ class Agent:
         reply, seconds, frame = await self._ask("planner", self.planner, PLANNER_PROMPT, prompt)
         self.plan, plan_zh = parse_plan(reply)
         self.plan_step = 1  # a new plan covers only what is left
+        self.task_ctx.rounds_on_step = 0  # and gets a full round budget (stalls still count up)
         self._record(frame, action="replan (stuck)" if stuck else "plan", plan=self.plan, plan_zh=plan_zh,
                      think_s=seconds)
 
@@ -969,6 +984,8 @@ class Agent:
                 acts = parse_actions(reply)
             except ValueError as e:
                 log.warning("unparseable actor reply (%s): %s", e, reply[:200])
+                if reply.strip():  # tell the model what was wrong instead of asking the same thing again
+                    prompt += f"\n\nYour last reply was rejected: {e}"
                 continue
             if self._missed() and _key(acts[0]) == _key(self.steps[-1]):  # same move that just did nothing
                 log.info("actor repeated an action that changed nothing; asking for another")
@@ -991,6 +1008,7 @@ class Agent:
             case "path": await self.phone.drag([(x / 1000, y / 1000) for x, y in a["points"]])
             case "circle": await self.phone.drag(circle(p("x"), p("y"), p("r"), self.screen.aspect))
             case "type": await self.phone.type(a["text"])
+            case "pinyin": await self.phone.pinyin(a["text"])
             case "key": await self.phone.key(a["combo"])
             case "home": await self.phone.go_home()
             case "back": await self.phone.go_back()

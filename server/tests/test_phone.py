@@ -49,3 +49,19 @@ def test_precise_tap_starts_from_the_corner(tmp_path):
     asyncio.run(p.tap(0.2, 0.2, aim=True))
     asyncio.run(p.tap(0.5, 0.6, aim=True))
     assert p.device.sent.count("home") == 2
+
+
+def test_pinyin_switches_keyboard_and_back(tmp_path, monkeypatch):
+    import hidagent.phone as phone_module
+    monkeypatch.setattr(phone_module, "IME_SWITCH", 0)
+    p = phone(tmp_path, [])
+    asyncio.run(p.pinyin("changanguniang"))
+    assert p.device.sent == ["key ctrl+space", "type changanguniang", "key space", "key ctrl+space"]
+
+
+def test_type_refuses_non_ascii(tmp_path):
+    import pytest
+    p = phone(tmp_path, [])
+    with pytest.raises(RuntimeError, match="ASCII"):
+        asyncio.run(p.type("长安姑娘"))
+    assert p.device.sent == []

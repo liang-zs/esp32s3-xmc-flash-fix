@@ -39,3 +39,25 @@ def test_round_trip_with_a_fake_board():
         server.close()
 
     asyncio.run(scenario())
+
+
+def test_info_reports_the_link_and_why_it_died():
+    async def scenario():
+        device = Device()
+        assert device.info()["lost_ago"] is None and not device.info()["connected"]
+        server = await device.serve("127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        reader, writer = await asyncio.open_connection("127.0.0.1", port)
+        writer.write(b"hello POWERON 1234\n")
+        await writer.drain()
+        assert await device.wait_connected(2)
+        info = device.info()
+        assert info["hello"] == "hello POWERON 1234" and info["peer"].startswith("127.0.0.1:")
+        writer.close()  # the board goes away; the next command finds out
+        with pytest.raises(DeviceError):
+            await device.send("ping")
+        info = device.info()
+        assert not info["connected"] and info["lost_ago"] is not None and "ping" in info["lost_reason"]
+        server.close()
+
+    asyncio.run(scenario())

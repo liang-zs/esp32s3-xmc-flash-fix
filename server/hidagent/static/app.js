@@ -53,7 +53,7 @@ async function post(path, body) {
 
 const fmt = (sec) => (sec == null ? "–" : sec < 10 ? `${sec.toFixed(1)}s` : `${Math.round(sec)}s`);
 const isPlan = (s) => s.action.includes("plan");
-const isBad = (s) => ["hiccup", "error", "fail"].includes(s.action);
+const isBad = (s) => ["hiccup", "stalled", "error", "fail"].includes(s.action);
 const what = (s) => describeStep(s)[lang === "zh" ? 1 : 0];
 // the model answers in English; a Chinese version is shown when it gives one
 const why = (s) => (lang === "zh" && s.thought_zh) || s.thought || s.answer || s.reason || "";

@@ -87,7 +87,7 @@ def index():
 
 @app.get("/api/status")
 def status():
-    return {"device": device.connected, "screen": screen.live, "calibrated": phone.calibrated,
+    return {"device": device.connected, "board": device.info(), "screen": screen.live, "calibrated": phone.calibrated,
             "debug": DEBUG, "trace": str(agent.trace.dir or ""), "aspect": round(screen.aspect, 4),
             "models": {"planner": agent.planner.model, "actor": agent.actor.model},
             "agent": {"running": agent.running, "task": agent.task,

@@ -22,6 +22,7 @@ CALIBRATION_MOVE = 200  # mouse units moved diagonally for a manual (one point) 
 CALIBRATION_STOPS = (150, 350)  # automatic calibration finds the pointer at these distances from the corner
 REHOME_EVERY = 10       # gestures between re-homing
 HOLD = 0.25             # seconds to rest before lifting, so iOS adds no momentum (the swipe stops where it ends)
+IME_SWITCH = 0.4        # seconds for iOS to switch keyboards / show pinyin candidates
 TAP_GAP = 0.15          # seconds to stay still after a click, so iOS sees a finished tap, not the start of a drag
 NUDGE = 12              # mouse units the pointer is wiggled by to find it on screen
 AIM_TOLERANCE = 0.008   # screen fraction; a bigger miss is corrected before pressing
@@ -237,7 +238,23 @@ class Phone:
         await self.device.send(f"scroll {lines} 0")
 
     async def type(self, text: str) -> None:
+        if not text.isascii():  # the board's keyboard sends ASCII keys; anything else turns into garbage
+            raise RuntimeError("type sends ASCII only; enter Chinese with pinyin()")
         await self.device.send(f"type {text}")
+
+    async def pinyin(self, letters: str) -> None:
+        """Enter Chinese through the iPhone's Pinyin keyboard: switch to it (ctrl+space), type the letters,
+        take the first candidate (space), switch back. Assumes the English keyboard was active, and leaves it so.
+        iPhone 11, 2026-11-17: "changanguniang" + space gave 长安姑娘 in bilibili search."""
+        await self.device.send("key ctrl+space")
+        await asyncio.sleep(IME_SWITCH)
+        try:
+            await self.device.send(f"type {letters}")
+            await asyncio.sleep(IME_SWITCH)  # let the candidate bar catch up before picking
+            await self.device.send("key space")
+        finally:
+            await asyncio.sleep(IME_SWITCH)
+            await self.device.send("key ctrl+space")
 
     async def key(self, combo: str) -> None:
         await self.device.send(f"key {combo}")
