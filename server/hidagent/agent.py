@@ -742,7 +742,7 @@ class Agent:
             )
 
     async def _ask(self, role: str, llm: LLM, system: str, prompt: str,
-                   temperature: float = 0) -> tuple[str, float, bytes | None]:
+                   temperature: float = 0, fast: bool = False) -> tuple[str, float, bytes | None]:
         if not self.screen.live:  # never let the model act blind
             raise BlindError("lost the phone screen: reconnect Screen Mirroring")
         self.task_ctx.transition(
@@ -754,16 +754,19 @@ class Agent:
             TaskState.PLAN,
             f"调用 DeepSeek {role} 模型"
         )
+        fast = fast and bool(getattr(llm, "fast_extra", None))  # only when FAST_BODY is configured
         frame, started = self.screen.frame, time.time()
-        reply = await llm.chat(system, prompt, frame, temperature=temperature)
+        reply = await (llm.chat(system, prompt, frame, temperature=temperature, fast=True) if fast
+                       else llm.chat(system, prompt, frame, temperature=temperature))
         seconds = round(time.time() - started, 2)
         used = getattr(llm, "last_usage", {}) or {}
         self.usage["calls"] = self.usage.get("calls", 0) + 1
         self.usage["llm_s"] = round(self.usage.get("llm_s", 0) + seconds, 2)
+        self.usage["fast_calls"] = self.usage.get("fast_calls", 0) + fast
         for k, v in used.items():
             self.usage[k] = self.usage.get(k, 0) + v
         self.trace.write(frame, kind="llm", role=role, model=llm.model, prompt=prompt,
-                         reply=reply, seconds=seconds)
+                         reply=reply, seconds=seconds, fast=fast)
         return reply, seconds, frame
 
     async def _run(self) -> None:
@@ -1022,7 +1025,9 @@ class Agent:
         prompt = (f"Goal: {self.task}\n\n{self._progress()}\n\nRecent actions:\n{history}\n\n"
                   "Next action? Start with STEP: <the plan step you are working on>.")
         for attempt in range(3):  # retry unparseable replies, a little less deterministically
-            reply, seconds, frame = await self._ask("actor", self.actor, ACTOR_PROMPT, prompt, 0.4 * attempt)
+            # routine step: answer fast; think it through when the last move did nothing or a reply was rejected
+            fast = attempt == 0 and not self._missed()
+            reply, seconds, frame = await self._ask("actor", self.actor, ACTOR_PROMPT, prompt, 0.4 * attempt, fast)
             try:
                 acts = parse_actions(reply)
             except ValueError as e:

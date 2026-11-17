@@ -105,3 +105,29 @@ def test_chinese_goes_through_pinyin_not_type():
     assert parse_command("pinyin nü") == {"action": "pinyin", "text": "nv"}
     with pytest.raises(ValueError, match="letters only"):
         parse_command("pinyin 长安")
+
+
+def test_actor_answers_fast_on_routine_steps_and_thinks_after_a_miss():
+    import asyncio
+
+    from hidagent.agent import Agent
+    from hidagent.debug import Trace
+
+    class Screen:
+        live, frame, aspect = True, b"jpeg", 0.46
+
+    class Actor:
+        model, fast_extra = "fake", {"thinking": {"type": "disabled"}}
+        def __init__(self):
+            self.fast = []
+        async def chat(self, system, text, image=None, max_tokens=600, temperature=0, fast=False):
+            self.fast.append(fast)
+            return "THINK: ok\nDO: tap 1 2"
+
+    actor = Actor()
+    agent = Agent(phone=None, screen=Screen(), actor=actor, planner=actor, trace=Trace(None))
+    agent.steps = [{"action": "tap", "x": 9, "y": 9, "changed": True}]
+    asyncio.run(agent._next_actions())
+    agent.steps = [{"action": "tap", "x": 9, "y": 9, "changed": False}]  # that tap missed: look harder
+    asyncio.run(agent._next_actions())
+    assert actor.fast == [True, False] and agent.usage["fast_calls"] == 1

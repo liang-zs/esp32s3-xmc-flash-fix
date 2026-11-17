@@ -95,3 +95,12 @@ def test_price_follows_deepseek_peak_hours_in_beijing_time():
     assert price_at(at(2026, 11, 17, 23, 0), peak, idle) == idle
     assert price_at(at(2026, 11, 21, 10, 0), peak, idle) == idle      # Saturday
     assert price_at(at(2026, 11, 17, 23, 0), peak) == peak            # no idle price set: always peak
+
+
+def test_fast_calls_add_the_fast_body_and_careful_ones_do_not():
+    llm = LLM("http://test/v1", "deepseek", extra={"a": 1}, fast_extra={"thinking": {"type": "disabled"}})
+    seen = fake_server(llm, "max_tokens")
+    asyncio.run(llm.chat("sys", "hi", fast=True))
+    asyncio.run(llm.chat("sys", "hi"))
+    assert seen[0]["thinking"] == {"type": "disabled"} and seen[0]["a"] == 1
+    assert "thinking" not in seen[1] and seen[1]["a"] == 1

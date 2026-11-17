@@ -17,8 +17,10 @@ MAX_TOKENS = 2000  # reply budget incl. a reasoning model's thinking (deepseek-f
 
 class LLM:
     def __init__(self, base_url: str, model: str, api_key: str = "", extra: dict | None = None,
-                 token_param: str = "auto"):
+                 token_param: str = "auto", fast_extra: dict | None = None):
         self.model, self.extra = model, extra or {}
+        # merged into routine calls the caller marks fast (e.g. thinking off); careful calls use `extra` alone
+        self.fast_extra = fast_extra or {}
         self.last_usage: dict = {}  # tokens used by the last chat() call
         # "auto": send max_tokens; switch for good if the server asks for max_completion_tokens (newer OpenAI models)
         self.token_param, self._auto = (token_param, False) if token_param in TOKEN_PARAMS else ("max_tokens", True)
@@ -31,18 +33,20 @@ class LLM:
         def env(key, default=""):
             return os.environ.get(f"{role}_{key}") or os.environ.get(f"LLM_{key}", default)
         return cls(env("BASE_URL", "http://localhost:8000/v1"), env("MODEL"),
-                   env("API_KEY"), json.loads(env("EXTRA_BODY", "{}")), env("TOKEN_PARAM", "auto"))
+                   env("API_KEY"), json.loads(env("EXTRA_BODY", "{}")), env("TOKEN_PARAM", "auto"),
+                   json.loads(env("FAST_BODY", "{}")))
 
     async def chat(self, system: str, text: str, image: bytes | None = None,
-                   max_tokens: int = MAX_TOKENS, temperature: float = 0) -> str:
+                   max_tokens: int = MAX_TOKENS, temperature: float = 0, fast: bool = False) -> str:
         """The reply text. Reasoning models count their thinking in max_tokens: when it runs out before any
         answer (empty content, finish_reason "length"), ask once more with twice the room.
-        Token use of the call, retries included, is left in `last_usage`."""
+        `fast` adds `fast_extra` to the request (thinking off): for routine steps; leave it off when the
+        model needs to look harder. Token use of the call, retries included, is left in `last_usage`."""
         content = [{"type": "text", "text": text}]
         if image:
             url = "data:image/jpeg;base64," + base64.b64encode(image).decode()
             content.insert(0, {"type": "image_url", "image_url": {"url": url}})
-        body = {"model": self.model, "temperature": temperature, **self.extra,
+        body = {"model": self.model, "temperature": temperature, **self.extra, **(self.fast_extra if fast else {}),
                 "messages": [{"role": "system", "content": system}, {"role": "user", "content": content}]}
         self.last_usage = {}
         for limit in (max_tokens, max_tokens * 2):
