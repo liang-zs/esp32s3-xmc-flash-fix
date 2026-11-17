@@ -1,6 +1,7 @@
 """Web API + control page. Run with `python -m hidagent`."""
 
 import asyncio
+import json
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -25,7 +26,8 @@ device = Device()
 screen = Screen(os.environ.get("AIRPLAY_NAME", "iPhone Agent"))
 phone = Phone(device, DATA_DIR / "calibration.json", screen)
 agent = Agent(phone, screen, LLM.from_env("ACTOR"), LLM.from_env("PLANNER"),
-              Trace(DATA_DIR / "traces" if DEBUG else None))
+              Trace(DATA_DIR / "traces" if DEBUG else None),
+              runs_file=DATA_DIR / "runs.jsonl", price=os.environ.get("LLM_PRICE", ""))
 
 
 @asynccontextmanager
@@ -92,7 +94,24 @@ def status():
             "models": {"planner": agent.planner.model, "actor": agent.actor.model},
             "agent": {"running": agent.running, "task": agent.task,
                       "state": agent.task_ctx.snapshot(), "steps": agent.steps,
-                      "progress": {"completed": agent.completed, "plan_step": agent.plan_step}}}
+                      "progress": {"completed": agent.completed, "plan_step": agent.plan_step},
+                      "usage": agent.usage}}
+
+
+@app.get("/api/runs")
+def runs(last: int = 50):
+    """Recent run summaries plus totals: success rate, average time and cost per run."""
+    path = DATA_DIR / "runs.jsonl"
+    rows = [json.loads(line) for line in path.read_text().splitlines() if line.strip()] if path.exists() else []
+    rows = rows[-last:]
+    ok = [r for r in rows if r.get("result") == "done"]
+    costs = [r["cost"] for r in rows if r.get("cost") is not None]
+    return {"runs": rows, "total": len(rows), "success": len(ok),
+            "success_rate": round(len(ok) / len(rows), 3) if rows else None,
+            "avg_seconds_ok": round(sum(r["seconds"] for r in ok) / len(ok), 1) if ok else None,
+            "avg_tokens": round(sum(r.get("prompt", 0) + r.get("completion", 0) for r in rows) / len(rows))
+            if rows else None,
+            "total_cost": round(sum(costs), 4) if costs else None}
 
 
 @app.get("/api/frame.jpg")

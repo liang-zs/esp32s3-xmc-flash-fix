@@ -25,7 +25,7 @@ def test_classic_servers_get_max_tokens_once():
     llm = LLM("http://test/v1", "qwen")
     seen = fake_server(llm, "max_tokens")
     assert asyncio.run(llm.chat("sys", "hi")) == "DO: wait"
-    assert len(seen) == 1 and seen[0]["max_tokens"] == 600
+    assert len(seen) == 1 and seen[0]["max_tokens"] == 2000
 
 
 def test_auto_switches_to_max_completion_tokens_and_remembers():
@@ -51,3 +51,28 @@ def test_extra_body_and_image_are_sent():
     body = seen[0]
     assert body["reasoning_effort"] == "none"
     assert body["messages"][1]["content"][0]["image_url"]["url"].startswith("data:image/jpeg;base64,")
+
+
+def test_reasoning_that_runs_out_is_retried_with_more_room():
+    # deepseek-flash, 2026-11-17: thinking used all 600 tokens, content came back empty ("actor gave no valid action")
+    from hidagent.llm import cost
+    seen = []
+
+    def handle(request):
+        body = json.loads(request.content)
+        seen.append(body["max_tokens"])
+        usage = {"prompt_tokens": 100, "completion_tokens": body["max_tokens"] // 2, "prompt_cache_hit_tokens": 40,
+                 "completion_tokens_details": {"reasoning_tokens": 50}}
+        if len(seen) == 1:
+            return httpx.Response(200, json={"choices": [{"message": {"content": ""}, "finish_reason": "length"}],
+                                             "usage": usage})
+        return httpx.Response(200, json={"choices": [{"message": {"content": "DO: wait"}, "finish_reason": "stop"}],
+                                         "usage": usage})
+
+    llm = LLM("http://test/v1", "deepseek-flash")
+    llm._http = httpx.AsyncClient(base_url="http://test/v1", transport=httpx.MockTransport(handle))
+    assert asyncio.run(llm.chat("sys", "hi", max_tokens=600)) == "DO: wait"
+    assert seen == [600, 1200]
+    assert llm.last_usage == {"prompt": 200, "completion": 900, "reasoning": 100, "cache_hit": 80}
+    assert cost(llm.last_usage, "1,2,3") == round((80 * 1 + 120 * 2 + 900 * 3) / 1e6, 6)
+    assert cost(llm.last_usage, "") is None

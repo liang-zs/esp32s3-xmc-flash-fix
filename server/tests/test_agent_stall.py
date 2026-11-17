@@ -105,3 +105,24 @@ def test_a_replan_gives_the_new_plan_a_full_budget():
     a.task_ctx.rounds_on_step = 7
     asyncio.run(a._replan(stuck=True))
     assert a.task_ctx.rounds_on_step == 0
+
+
+def test_each_run_leaves_a_summary_line(tmp_path, monkeypatch):
+    import json
+
+    from hidagent import agent as agent_module
+    monkeypatch.setattr(agent_module.vision, "changed", lambda *a, **k: True)
+
+    class DoneLLM:
+        model = "fake"
+        last_usage = {"prompt": 10, "completion": 5, "reasoning": 2, "cache_hit": 0}
+
+        async def chat(self, system, text, image=None, max_tokens=600, temperature=0):
+            return "STEP: 2\nTHINK: ok\nDO: done opened"
+
+    a = Agent(phone=Phone(), screen=BusyScreen(), actor=DoneLLM(), planner=DoneLLM(), trace=Trace(),
+              runs_file=tmp_path / "runs.jsonl", price="1,2,3")
+    run(a)
+    row = json.loads((tmp_path / "runs.jsonl").read_text())
+    assert row["result"] == "done" and row["task"] == "打开 Settings" and row["calls"] == 2
+    assert row["prompt"] == 20 and row["completion"] == 10 and row["cost"] == round((20 * 2 + 10 * 3) / 1e6, 6)

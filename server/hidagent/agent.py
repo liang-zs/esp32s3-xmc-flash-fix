@@ -6,11 +6,12 @@ import logging
 import math
 import re
 import time
+from pathlib import Path
 
 from . import vision
 from .debug import Trace
 from .device import DeviceError
-from .llm import LLM
+from .llm import LLM, cost
 from .phone import Phone
 from .screen import Screen
 from .task_state import Recovery, TaskContext, TaskState
@@ -673,11 +674,15 @@ class BlindError(RuntimeError):
 
 class Agent:
     def __init__(self, phone: Phone, screen: Screen, actor: LLM, planner: LLM, trace: Trace,
-                 max_steps: int = 40, max_failures: int = 3, max_seconds: float = 300):
+                 max_steps: int = 40, max_failures: int = 3, max_seconds: float = 300,
+                 runs_file: Path | None = None, price: str = ""):
         self.phone, self.screen, self.actor, self.planner = phone, screen, actor, planner
         self.trace = trace
         self.max_steps, self.max_failures = max_steps, max_failures
         self.max_seconds = max_seconds  # whole-task time limit: a hung step or a slow loop can't run forever
+        self.runs_file, self.price = runs_file, price  # one summary line per run; LLM_PRICE for the cost
+        self.usage: dict = {}  # this run: LLM calls, seconds and tokens
+        self._started = 0.0
         self.task, self.plan, self.steps = "", "", []
         self.completed: list[str] = []  # plan steps finished so far; survives replans
         self.plan_step = 1  # 1-based step of the current plan being worked on; only moves forward
@@ -699,6 +704,7 @@ class Agent:
         self.task, self.plan, self.steps, self.shots = task, "", [], {}
         self.completed, self.plan_step = [], 1
         self._pointer = (0.0, 0.0)
+        self.usage, self._started = {}, time.time()
         self.task_ctx = TaskContext(task_name=task)
         self.trace.start(task)
         self._job = asyncio.create_task(self._run())
@@ -712,6 +718,7 @@ class Agent:
             raise RuntimeError("stop the agent first")
         self.task, self.plan, self.steps, self.shots = "", "", [], {}
         self.completed, self.plan_step = [], 1
+        self.usage = {}
         self.task_ctx = TaskContext(task_name="")  # 清空后 UI 回到 idle
 
     def _record(self, shot: bytes | None = None, **step) -> None:
@@ -749,11 +756,44 @@ class Agent:
         frame, started = self.screen.frame, time.time()
         reply = await llm.chat(system, prompt, frame, temperature=temperature)
         seconds = round(time.time() - started, 2)
+        used = getattr(llm, "last_usage", {}) or {}
+        self.usage["calls"] = self.usage.get("calls", 0) + 1
+        self.usage["llm_s"] = round(self.usage.get("llm_s", 0) + seconds, 2)
+        for k, v in used.items():
+            self.usage[k] = self.usage.get(k, 0) + v
         self.trace.write(frame, kind="llm", role=role, model=llm.model, prompt=prompt,
                          reply=reply, seconds=seconds)
         return reply, seconds, frame
 
     async def _run(self) -> None:
+        try:
+            await self._attempt()
+        finally:
+            self._summarize()
+
+    def _summarize(self) -> dict:
+        """One line per run in runs.jsonl: outcome, steps, time, tokens, cost. The success rate and the
+        cost per task come from these lines."""
+        last = self.steps[-1] if self.steps else {}
+        acts = [s for s in self.steps if s.get("action") not in ("plan", "replan (stuck)", "stalled", "hiccup")]
+        run = {"time": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(self._started or time.time())),
+               "task": self.task, "result": last.get("action", ""), "reason": str(last.get("reason", ""))[:200],
+               "seconds": round(time.time() - self._started, 1) if self._started else 0,
+               "actions": len(acts), "replans": sum(s.get("action") == "replan (stuck)" for s in self.steps),
+               "hiccups": sum(s.get("action") == "hiccup" for s in self.steps),
+               "models": {"actor": self.actor.model, "planner": self.planner.model},
+               **self.usage, "cost": cost(self.usage, self.price)}
+        self.usage["cost"] = run["cost"]
+        log.info("run: %s", run)
+        if self.runs_file:
+            try:
+                with self.runs_file.open("a") as f:
+                    f.write(json.dumps(run, ensure_ascii=False) + "\n")
+            except OSError as e:
+                log.warning("could not write %s: %s", self.runs_file, e)
+        return run
+
+    async def _attempt(self) -> None:
         failures, deadline = 0, time.time() + self.max_seconds
         try:
             await self._replan()
