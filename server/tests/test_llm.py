@@ -76,3 +76,22 @@ def test_reasoning_that_runs_out_is_retried_with_more_room():
     assert llm.last_usage == {"prompt": 200, "completion": 900, "reasoning": 100, "cache_hit": 80}
     assert cost(llm.last_usage, "1,2,3") == round((80 * 1 + 120 * 2 + 900 * 3) / 1e6, 6)
     assert cost(llm.last_usage, "") is None
+
+
+def test_price_follows_deepseek_peak_hours_in_beijing_time():
+    from datetime import datetime
+
+    from hidagent.llm import BEIJING, price_at
+
+    def at(y, mo, d, h, mi=0):
+        return datetime(y, mo, d, h, mi, tzinfo=BEIJING).timestamp()
+
+    peak, idle = "0.04,2,8", "0.02,1,4"
+    assert price_at(at(2026, 11, 17, 9, 0), peak, idle) == peak       # Tuesday 9:00
+    assert price_at(at(2026, 11, 17, 11, 59), peak, idle) == peak
+    assert price_at(at(2026, 11, 17, 12, 30), peak, idle) == idle     # lunch break
+    assert price_at(at(2026, 11, 17, 17, 59), peak, idle) == peak
+    assert price_at(at(2026, 11, 17, 18, 0), peak, idle) == idle
+    assert price_at(at(2026, 11, 17, 23, 0), peak, idle) == idle
+    assert price_at(at(2026, 11, 21, 10, 0), peak, idle) == idle      # Saturday
+    assert price_at(at(2026, 11, 17, 23, 0), peak) == peak            # no idle price set: always peak

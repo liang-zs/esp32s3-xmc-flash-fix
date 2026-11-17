@@ -93,12 +93,12 @@ uv run --env-file .env python -m hidagent
 - **步骤卡住也会停**：屏幕一直在变、但计划步骤迟迟完成不了（进错页面、来回点同一处）时，无变化检测看不出来。所以同一步骤超过 8 轮就重新规划，第二次再卡住就判失败。整个任务另有 300 秒总时限，超时后先松开按键并回到角落再结束。
 - **中文输入走拼音**：板子的键盘只能发 ASCII 按键，直接 `type` 中文会变成乱码（「长安姑娘」→「9j;5952f53m」）。所以 `type` 拒绝非 ASCII，中文改用 `pinyin` 动作：Ctrl+空格切到 iPhone 的简体拼音，输入字母，空格选第一个候选，再切回英文。需要 iPhone 已添加简体拼音键盘，且平时停在英文输入。
 - **推理模型的回复预算**：deepseek-flash 会先「思考」，思考也算在 `max_tokens` 里。原来上限是 600，复杂截图时思考就把额度用完了，返回空内容（日志里的 `actor gave no valid action`）。现在上限是 2000，遇到「用完额度但没有答案」会自动加倍重试一次。
-- **每次运行有统计**：结束时向 `~/.hidagent/runs.jsonl` 写一行（结果、用时、动作数、重规划次数、LLM 调用次数和 tokens、费用），`GET /api/runs` 汇总成功率、平均用时、平均 tokens。在 `.env` 里设置 `LLM_PRICE` 后才计算费用。
+- **每次运行有统计**：结束时向 `~/.hidagent/runs.jsonl` 写一行（结果、用时、动作数、重规划次数、LLM 调用次数和 tokens、费用），`GET /api/runs` 汇总成功率、平均用时、平均 tokens。在 `.env` 里设置 `LLM_PRICE`（高峰价）后才计算费用；再设 `LLM_PRICE_IDLE` 就按北京时间区分高峰（工作日 9–12、14–18 点，可用 `LLM_PEAK_HOURS` 改）和空闲时段，按任务开始时间计价。
 - **板子连接可查**：`/api/status` 的 `board` 字段给出对方地址、固件问候、已连接时长、上次断线时间和原因，能区分「板子从没连上」和「连上后断了」。
 
 ## 测试
 
-`server/tests/` 有 62 个测试，当前全部通过（agent 回复解析、恢复与计划进度、device 协议与超时、llm 的 token 参数回退、vision 差分与指针识别、phone 闭环瞄准、状态机升级）。
+`server/tests/` 有 63 个测试，当前全部通过（agent 回复解析、恢复与计划进度、device 协议与超时、llm 的 token 参数回退、vision 差分与指针识别、phone 闭环瞄准、状态机升级）。
 
 `server/.venv` 只装了运行时依赖；装上 dev extra 后即可运行：
 

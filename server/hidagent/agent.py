@@ -6,6 +6,7 @@ import logging
 import math
 import re
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 from . import vision
@@ -675,7 +676,7 @@ class BlindError(RuntimeError):
 class Agent:
     def __init__(self, phone: Phone, screen: Screen, actor: LLM, planner: LLM, trace: Trace,
                  max_steps: int = 40, max_failures: int = 3, max_seconds: float = 300,
-                 runs_file: Path | None = None, price: str = ""):
+                 runs_file: Path | None = None, price: str | Callable[[float], str] = ""):
         self.phone, self.screen, self.actor, self.planner = phone, screen, actor, planner
         self.trace = trace
         self.max_steps, self.max_failures = max_steps, max_failures
@@ -782,7 +783,9 @@ class Agent:
                "actions": len(acts), "replans": sum(s.get("action") == "replan (stuck)" for s in self.steps),
                "hiccups": sum(s.get("action") == "hiccup" for s in self.steps),
                "models": {"actor": self.actor.model, "planner": self.planner.model},
-               **self.usage, "cost": cost(self.usage, self.price)}
+               **self.usage}
+        price = self.price(self._started or time.time()) if callable(self.price) else self.price
+        run["cost"] = cost(self.usage, price)
         self.usage["cost"] = run["cost"]
         log.info("run: %s", run)
         if self.runs_file:

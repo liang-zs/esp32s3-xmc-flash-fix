@@ -4,10 +4,12 @@ import base64
 import json
 import logging
 import os
+from datetime import datetime, timedelta, timezone
 
 import httpx
 
 log = logging.getLogger(__name__)
+BEIJING = timezone(timedelta(hours=8))  # DeepSeek peak hours are in Beijing time (no DST)
 
 TOKEN_PARAMS = ("max_tokens", "max_completion_tokens")
 MAX_TOKENS = 2000  # reply budget incl. a reasoning model's thinking (deepseek-flash thinks ~400+ tokens per step)
@@ -83,3 +85,25 @@ def cost(usage: dict, price: str) -> float | None:
         return None
     cached = usage.get("cache_hit", 0)
     return round((cached * hit + (usage.get("prompt", 0) - cached) * miss + usage.get("completion", 0) * out) / 1e6, 6)
+
+
+def price_at(when: float, peak: str, idle: str = "", hours: str = "9-12,14-18") -> str:
+    """The price string in force at `when` (epoch seconds). DeepSeek bills peak hours on workdays,
+    Beijing time (default 9:00-12:00 and 14:00-18:00); weekends and other hours use `idle` when it is set.
+    Public holidays are not known here and count as workdays."""
+    if not idle:
+        return peak
+    t = datetime.fromtimestamp(when, BEIJING)
+    if t.weekday() >= 5:
+        return idle
+    minute = t.hour * 60 + t.minute
+    for span in hours.split(","):
+        start, _, end = span.strip().partition("-")
+        if start and end and _minutes(start) <= minute < _minutes(end):
+            return peak
+    return idle
+
+
+def _minutes(hhmm: str) -> int:
+    h, _, m = hhmm.strip().partition(":")
+    return int(h) * 60 + int(m or 0)

@@ -14,7 +14,7 @@ from pydantic import BaseModel
 from .agent import Agent
 from .debug import Trace
 from .device import Device, DeviceError
-from .llm import LLM
+from .llm import LLM, price_at
 from .phone import Phone
 from .screen import Screen
 
@@ -27,7 +27,9 @@ screen = Screen(os.environ.get("AIRPLAY_NAME", "iPhone Agent"))
 phone = Phone(device, DATA_DIR / "calibration.json", screen)
 agent = Agent(phone, screen, LLM.from_env("ACTOR"), LLM.from_env("PLANNER"),
               Trace(DATA_DIR / "traces" if DEBUG else None),
-              runs_file=DATA_DIR / "runs.jsonl", price=os.environ.get("LLM_PRICE", ""))
+              runs_file=DATA_DIR / "runs.jsonl",
+              price=lambda when: price_at(when, os.environ.get("LLM_PRICE", ""), os.environ.get("LLM_PRICE_IDLE", ""),
+                                          os.environ.get("LLM_PEAK_HOURS", "9-12,14-18")))
 
 
 @asynccontextmanager
