@@ -673,6 +673,9 @@ class BlindError(RuntimeError):
     """The screen feed is gone; acting now would be guessing."""
 
 
+FAST_ROUNDS = 3  # rounds on one plan step after which the actor thinks again
+
+
 class Agent:
     def __init__(self, phone: Phone, screen: Screen, actor: LLM, planner: LLM, trace: Trace,
                  max_steps: int = 40, max_failures: int = 3, max_seconds: float = 300,
@@ -1025,8 +1028,10 @@ class Agent:
         prompt = (f"Goal: {self.task}\n\n{self._progress()}\n\nRecent actions:\n{history}\n\n"
                   "Next action? Start with STEP: <the plan step you are working on>.")
         for attempt in range(3):  # retry unparseable replies, a little less deterministically
-            # routine step: answer fast; think it through when the last move did nothing or a reply was rejected
-            fast = attempt == 0 and not self._missed()
+            # routine step: answer fast; think it through when the last move did nothing, a reply was rejected,
+            # or the plan step has not advanced for a while (fast replies tend to keep repeating the old STEP
+            # number after the screen moved on, which the stall budget would read as being stuck)
+            fast = attempt == 0 and not self._missed() and self.task_ctx.rounds_on_step < FAST_ROUNDS
             reply, seconds, frame = await self._ask("actor", self.actor, ACTOR_PROMPT, prompt, 0.4 * attempt, fast)
             try:
                 acts = parse_actions(reply)

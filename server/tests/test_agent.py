@@ -130,4 +130,7 @@ def test_actor_answers_fast_on_routine_steps_and_thinks_after_a_miss():
     asyncio.run(agent._next_actions())
     agent.steps = [{"action": "tap", "x": 9, "y": 9, "changed": False}]  # that tap missed: look harder
     asyncio.run(agent._next_actions())
-    assert actor.fast == [True, False] and agent.usage["fast_calls"] == 1
+    agent.steps = [{"action": "tap", "x": 9, "y": 9, "changed": True}]
+    agent.task_ctx.rounds_on_step = 3  # the screen changes, but the plan step does not advance
+    asyncio.run(agent._next_actions())
+    assert actor.fast == [True, False, False] and agent.usage["fast_calls"] == 1
