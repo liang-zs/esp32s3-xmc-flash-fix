@@ -27,6 +27,7 @@ TAP_GAP = 0.15          # seconds to stay still after a click, so iOS sees a fin
 NUDGE = 12              # mouse units the pointer is wiggled by to find it on screen
 AIM_TOLERANCE = 0.008   # screen fraction; a bigger miss is corrected before pressing
 AIM_ROUNDS = 3          # find-and-correct rounds before pressing anyway (each correction is a move that can miss too)
+SPOT_WAIT = 0.55        # seconds after a wiggle before its frame is used (AirPlay shows it ~0.2-0.35 s later)
 MAX_MISS = 0.06         # bigger misses are still corrected, but not learned from (they may be misreadings)
 
 
@@ -137,14 +138,17 @@ class Phone:
         screen with an animation a new frame arrives every second anyway, and that one may predate the move.
         near=None searches the whole screen.
         """
-        frames = []
+        frames, marks = [], []
         for step in (nudge, -nudge):
             sent = time.time()
             await self.device.send(f"move {step} 0")
             if not await self.screen.fresh(sent, wait):
                 return None
-            await self.screen.settled(quiet=0.15, least=0.25, most=0.8)
+            # a 12-unit wiggle is too small to count as a content change, so give the frame showing it time to come
+            await self.screen.settled(quiet=0.15, least=SPOT_WAIT, most=0.8)
+            marks.append(f"{time.time() - sent:.2f}")
             frames.append(self.screen.frame)
+        log.debug("spot: wiggle took %s s", " + ".join(marks))
         after, back = frames
         if near is not None:
             found = vision.pointer(back, after, near, shift)

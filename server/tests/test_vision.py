@@ -121,3 +121,27 @@ def test_pointer_hidden_before_the_wiggle_is_still_found_close():
     # iOS hides a resting pointer: only one of the two frames may show it; the error is at most shift/2
     found = pointer(screen(), screen((274, 856)), near=(0.5, 0.8), shift=12 / W)
     assert found is not None and abs(found[0] * W - 262) <= 7 and abs(found[1] * H - 856) <= 3
+
+
+def test_stream_noise_is_not_a_screen_change():
+    # iPhone 11, 2026-11-17: AirPlay streams ~8 fps of near-identical frames, so "no new frame for a while"
+    # never happened and every settle ran to its limit; settled() now looks at content.
+    from PIL import Image, ImageDraw
+
+    from hidagent.screen import _differs, _thumb
+
+    def jpeg(dot=None, speck=False):
+        im = Image.new("RGB", (400, 800), (40, 40, 40))
+        d = ImageDraw.Draw(im)
+        if speck:
+            d.point([(10, 10), (300, 500)], fill=(90, 90, 90))  # a couple of noisy pixels
+        if dot:
+            d.ellipse([dot[0] - 12, dot[1] - 12, dot[0] + 12, dot[1] + 12], fill=(200, 200, 200))
+        buf = io.BytesIO()
+        im.save(buf, "JPEG", quality=75)
+        return buf.getvalue()
+
+    base = _thumb(jpeg())
+    assert not _differs(base, _thumb(jpeg(speck=True)))
+    assert _differs(base, _thumb(jpeg(dot=(200, 400))))
+    assert _differs(None, base)
