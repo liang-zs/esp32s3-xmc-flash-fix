@@ -5,8 +5,13 @@
 Same screenshot, same prompt, current ACTOR_PROMPT. "match" means the same action (taps within 4% of
 the screen); a mismatch is not always wrong (any point on a row hits it), so read the listed ones.
 Use it before switching models, prompts or ACTOR_FAST_BODY; the phone run is still the final check."""
-import asyncio, json, math, sys, time
+import asyncio
+import json
+import math
+import sys
+import time
 from pathlib import Path
+
 from hidagent.agent import ACTOR_PROMPT, parse_actions
 from hidagent.llm import LLM
 
@@ -35,15 +40,17 @@ async def main(dirs):
     async def one(mode, c):
         async with sem:
             llm = LLM.from_env("ACTOR")
-            t = time.time(); reply = await llm.chat(ACTOR_PROMPT, c[2], c[4], fast=MODES[mode])
+            t = time.time()
+            reply = await llm.chat(ACTOR_PROMPT, c[2], c[4], fast=MODES[mode])
             return mode, c, reply, time.time() - t, llm.last_usage
     res = await asyncio.gather(*(one(m, c) for m in MODES for c in calls))
     for mode in MODES:
         rows = [r for r in res if r[0] == mode]
         ok = 0
-        for _, c, reply, s, u in rows:
+        for _, c, reply, _s, _u in rows:
             ref, got = first(c[3]), first(reply)
-            m = same(ref, got); ok += m
+            m = same(ref, got)
+            ok += m
             if not m: print(f"  {mode} {Path(c[0]).name}#{c[1]}: recorded {ref} | got {got}")
         secs = sorted(r[3] for r in rows)
         print(f"{mode}: {ok}/{len(rows)} match, mean {sum(secs)/len(secs):.2f}s, median {secs[len(secs)//2]:.2f}s, "
