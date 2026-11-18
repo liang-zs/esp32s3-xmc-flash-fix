@@ -97,7 +97,6 @@ PLAN PROGRESS:
 
 IMPORTANT:
 - Output exactly ONE DO line per response.
-- Do not output multiple actions.
 - Do not include Markdown code fences.
 - Do not assume an action succeeded until a new screenshot confirms it.
 - Use the visible screenshot, not imagined screen contents.
@@ -546,6 +545,7 @@ type TEXT
 pinyin LETTERS
 clear        (empties the focused text field; use it instead of
               cmd+a or the field's x button)
+press KEYS   (keypad keys by label, e.g. press 1 2 8 x 3 7 =; see KEYPADS)
 key COMBO
 home
 back
@@ -609,6 +609,18 @@ THINK: The Notes app is open, so the requested
 task has been completed.
 DO: done Opened the Notes app successfully.
 
+KEYPADS:
+To enter a number or expression on a keypad that stays in place
+(Calculator, a number pad), name the keys in ONE action:
+DO: press 4 5 + 6 =
+Labels are separated by spaces, in order (digits, . + - x / = C AC
+or the key's text). The system finds each key on this screenshot and
+taps it; do not give coordinates. Then check the result on the next
+screenshot. If it is wrong, reset (top-left key twice) and press the
+whole sequence again; never repair a half-entered number key by key.
+The display shows only the number being typed (after 128 x then 3 it
+shows 3). Use press only on keypads, never on lists, menus or text.
+
 FINAL RULE:
 Perform exactly ONE action per response,
 then observe the next screenshot before continuing.
@@ -622,8 +634,8 @@ META = ("t", "thought", "thought_zh", "think_s", "act_s", "shot", "_shot", "chan
 # action name -> argument names; numeric arguments are 0-1000 screen coordinates
 ACTIONS = {"tap": ("x", "y"), "swipe": ("x1", "y1", "x2", "y2"), "circle": ("x", "y", "r"), "path": ("points",),
            "type": ("text",), "pinyin": ("text",), "key": ("combo",), "done": ("answer",), "fail": ("reason",),
-           "home": (), "back": (), "wait": (), "replan": (), "clear": ()}
-TEXT_ARGS = ("text", "combo", "answer", "reason")
+           "home": (), "back": (), "wait": (), "replan": (), "clear": (), "press": ("keys",)}
+TEXT_ARGS = ("text", "combo", "answer", "reason", "keys")
 
 
 def parse_command(line: str) -> dict:
@@ -638,6 +650,10 @@ def parse_command(line: str) -> dict:
         if name == "type" and not text.isascii():  # the board types ASCII keys only: Chinese came out as garbage
             raise ValueError(f"type sends ASCII only, it cannot enter {text[:20]!r}. For Chinese use the pinyin "
                              "action with the pinyin letters, e.g. 长安姑娘 -> DO: pinyin changanguniang")
+        if name == "press":
+            labels = text.split()
+            if not 1 <= len(labels) <= 12:
+                raise ValueError(f"press takes 1-12 key labels separated by spaces: {rest[:60]!r}")
         if name == "pinyin":
             text = text.lower().replace("ü", "v").replace("u:", "v")
             text = re.sub(r"[\s'’]", "", text)  # a space would commit a candidate halfway
@@ -661,7 +677,7 @@ def parse_actions(text: str) -> list[dict]:
     """Parse a THINK / DO… reply (an optional ZH line is kept); the thought goes on the first action."""
     thought = re.search(r"^\s*THINK\s*[:：]\s*(.*?)\s*$", text, re.M | re.I)
     zh = re.search(r"^\s*ZH\s*[:：]\s*(.*?)\s*$", text, re.M | re.I)
-    acts = [parse_command(line) for line in re.findall(r"^\s*DO\s*[:：]\s*(.*?)\s*$", text, re.M | re.I)][:6]
+    acts = [parse_command(line) for line in re.findall(r"^\s*DO\s*[:：]\s*(.*?)\s*$", text, re.M | re.I)][:8]
     if not acts:
         raise ValueError(f"no DO line in reply: {text[:200]}")
     acts[0] = {"thought": thought.group(1) if thought else "", "thought_zh": zh.group(1) if zh else "", **acts[0]}
@@ -695,6 +711,8 @@ class BlindError(RuntimeError):
 
 
 FAST_ROUNDS = 3  # rounds on one plan step after which the actor thinks again
+LOCATE_PROMPT = ("You locate keys on iPhone screenshots. Coordinates use a 0-1000 scale for x (left to right) "
+                 "and y (top to bottom). Reply with the center of the key the user names.")
 GOAL_CHECK = ("First look at the screenshot: if it shows the goal reached by the actions of this task (e.g. the "
               "result they computed), reply DO: done <answer> now, even with plan steps left; never undo it. "
               "Something already on screen when an app opened is left over from before and does not count.\n")
@@ -1106,6 +1124,37 @@ class Agent:
             return [{**a, "_shot": frame} for a in acts]  # every action is drawn on the same screenshot
         raise ValueError(f"actor gave no valid action: {reply[:200]}")
 
+    async def _locate_keys(self, labels: list[str]) -> list[tuple[int, int]]:
+        """Positions (0-1000) of keypad keys named by label, one fast question per distinct label, in parallel.
+        iPhone 11 Calculator, 2026-11-18: asked one key at a time the actor found 16/16 keys, but writing a
+        7-tap sequence of coordinates itself it got 0/16 sequences right (1 2 8 came out as 1 2 3)."""
+        frame = self.screen.frame
+        image = vision.grid(frame) if self.grid else frame
+        system = LOCATE_PROMPT + (GRID_NOTE if self.grid else "")
+
+        async def one(label: str) -> tuple[int, int]:
+            started = time.time()
+            reply = await (self.actor.chat(system, f"Where is the center of the key labeled '{label}'? "
+                                           "Answer with one line: X Y", image, max_tokens=300, fast=True)
+                           if getattr(self.actor, "fast_extra", None) else
+                           self.actor.chat(system, f"Where is the center of the key labeled '{label}'? "
+                                           "Answer with one line: X Y", image))
+            self.usage["calls"] = self.usage.get("calls", 0) + 1
+            self.usage["locate_s"] = round(self.usage.get("locate_s", 0) + time.time() - started, 2)
+            for k, v in (getattr(self.actor, "last_usage", {}) or {}).items():
+                self.usage[k] = self.usage.get(k, 0) + v
+            nums = re.findall(r"\d+(?:\.\d+)?", reply.strip().splitlines()[-1] if reply.strip() else "")
+            if len(nums) < 2:
+                raise ValueError(f"could not find key {label!r} on screen: {reply[:80]!r}")
+            x, y = round(float(nums[-2])), round(float(nums[-1]))
+            if not (0 <= x <= 1000 and 0 <= y <= 1000):
+                raise ValueError(f"key {label!r} located off screen at {x} {y}")
+            return x, y
+
+        found = dict(zip(set(labels), await asyncio.gather(*map(one, set(labels))), strict=True))
+        log.info("[PRESS] %s", {k: found[k] for k in labels})
+        return [found[k] for k in labels]
+
     async def _do(self, a: dict) -> None:
         self.task_ctx.transition(
             TaskState.ACT,
@@ -1120,6 +1169,10 @@ class Agent:
             case "type": await self.phone.type(a["text"])
             case "pinyin": await self.phone.pinyin(a["text"])
             case "clear": await self.phone.clear_field()
+            case "press":
+                a["taps"] = await self._locate_keys(a["keys"].split())
+                for x, y in a["taps"]:
+                    await self.phone.tap(x / 1000, y / 1000, aim=True)
             case "key": await self.phone.key(a["combo"])
             case "home": await self.phone.go_home()
             case "back": await self.phone.go_back()
@@ -1137,6 +1190,7 @@ def _pointer_path(act: dict) -> list[tuple[float, float]]:
         case "circle": return [f(act["x"] + act["r"], act["y"])]
         case "home": return [(0.5, 0.995), (0.5, 0.6)]
         case "back": return [(0.005, 0.45), (0.6, 0.45)]
+        case "press": return [f(x, y) for x, y in act.get("taps", [])]
         case _: return []
 
 

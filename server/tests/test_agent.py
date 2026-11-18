@@ -18,9 +18,9 @@ def test_parse_several_actions_keeps_thought_on_first():
     assert "thought" not in acts[1]
 
 
-def test_parse_caps_at_six_actions():
+def test_parse_caps_at_eight_actions():  # a keypad expression such as 128 x 37 = is seven taps
     reply = "THINK: draw\n" + "\n".join(f"DO: tap {i} {i}" for i in range(10))
-    assert len(parse_actions(reply)) == 6
+    assert len(parse_actions(reply)) == 8
 
 
 def test_parse_path_and_circle():
@@ -184,3 +184,44 @@ def test_grid_goes_to_the_actor_only_and_the_trace_keeps_the_clean_frame():
     asyncio.run(agent._ask("planner", planner, "SYS", "go"))
     assert frame == clean and actor.seen[0][1] != clean and "grid lines" in actor.seen[0][0]
     assert planner.seen[0] == ("SYS", clean)
+
+
+def test_press_parses_key_labels():
+    assert parse_command("press 1 2 8 × 3 7 =") == {"action": "press", "keys": "1 2 8 × 3 7 ="}
+    import pytest
+    with pytest.raises(ValueError, match="1-12 key labels"):
+        parse_command("press")
+
+
+def test_press_locates_each_distinct_key_once_and_taps_in_order():
+    import asyncio
+    import re
+
+    from hidagent.agent import Agent
+    from hidagent.debug import Trace
+    where = {"1": (140, 756), "2": (380, 756), "8": (380, 537), "×": (854, 537), "=": (854, 866)}
+
+    class Screen:
+        live, frame, aspect = True, b"jpeg", 0.46
+
+    class Actor:
+        model, fast_extra, last_usage = "fake", {"thinking": {"type": "disabled"}}, {}
+        def __init__(self):
+            self.asked = []
+        async def chat(self, system, text, image=None, max_tokens=600, temperature=0, fast=False):
+            label = re.search(r"labeled '(.+?)'", text).group(1)
+            self.asked.append(label)
+            return "%d %d" % where[label]
+
+    class Phone:
+        def __init__(self):
+            self.taps = []
+        async def tap(self, x, y, aim=False):
+            self.taps.append((round(x * 1000), round(y * 1000)))
+
+    actor, phone = Actor(), Phone()
+    agent = Agent(phone=phone, screen=Screen(), actor=actor, planner=actor, trace=Trace(None))
+    act = {"action": "press", "keys": "1 2 8 × 2 ="}
+    asyncio.run(agent._do(act))
+    assert sorted(actor.asked) == sorted(set("1 2 8 × =".split()))  # "2" asked once
+    assert phone.taps == [where[k] for k in "1 2 8 × 2 =".split()] == act["taps"]
