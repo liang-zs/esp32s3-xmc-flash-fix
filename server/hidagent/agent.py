@@ -295,7 +295,12 @@ Distinguish application icons and app result rows from:
 - Other unrelated search matches
 
 STEP L:
-Tap the actual app result.
+Tap the actual app result: the app icon under "Top Hit"
+(Spotlight's first section). Rows under "Siri Suggestions" with a
+Safari compass icon, or a magnifier icon, are web searches: tapping
+"notes" there opens Safari, not Notes (iPhone 11, 2026-11-18). If the
+app is not under Top Hit, use an app icon that shows the app's own
+icon and name, never a row with a Safari or magnifier icon.
 
 Example:
 
@@ -713,8 +718,14 @@ AT_BUTTON_Q = ("Where is the center of the AssistiveTouch floating button (a tra
 AT_HOME_Q = ("Is the AssistiveTouch menu open: a dark rounded panel floating over the screen with items such as "
              "Notification Center, Device, Control Center, Siri, Home and Custom? If it is, where is the center of the "
              "Home item inside that panel? An app icon named Home on the Home Screen is not it.")
+# wording matters: "You locate things ... the thing the user describes" made the locator answer none for the
+# AssistiveTouch button on 6 of 10 tries on two frames; this wording found it 10 of 10
 LOCATE_PROMPT = ("You locate keys on iPhone screenshots. Coordinates use a 0-1000 scale for x (left to right) "
                  "and y (top to bottom). Reply with the center of the key the user names.")
+# only for things named by their text (tapon, press): on the textless, faint AssistiveTouch button it made the
+# locator answer none on 2 of 8 frames
+EXACT_TEXT = (" Match its visible text exactly (same word and spelling): a label that only contains or resembles it "
+              "is a different thing (Notes is not rednote). If it is not on this screenshot, say none.")
 GOAL_CHECK = ("First look at the screenshot: if it shows the goal reached by the actions of this task (e.g. the "
               "result they computed), reply DO: done <answer> now, even with plan steps left; never undo it. "
               "Something already on screen when an app opened is left over from before and does not count.\n")
@@ -1139,11 +1150,12 @@ class Agent:
                  time.time() - started)
         return hit
 
-    async def _locate(self, question: str) -> tuple[int, int] | None:
-        """One fast question about the current frame: where is <thing>? (0-1000), None if it is not there."""
+    async def _locate(self, question: str, by_text: bool = False) -> tuple[int, int] | None:
+        """One fast question about the current frame: where is <thing>? (0-1000), None if it is not there.
+        by_text: the thing is named by its visible text, which must match exactly."""
         frame = self.screen.frame
         image = vision.grid(frame) if self.grid else frame
-        system = LOCATE_PROMPT + (GRID_NOTE if self.grid else "")
+        system = LOCATE_PROMPT + (EXACT_TEXT if by_text else "") + (GRID_NOTE if self.grid else "")
         text = question + " If there is none, answer: none. Otherwise answer with one line: X Y"
         started = time.time()
         reply = await (self.actor.chat(system, text, image, max_tokens=300, fast=True)
@@ -1154,10 +1166,14 @@ class Agent:
             self.usage[k] = self.usage.get(k, 0) + v
         last = reply.strip().splitlines()[-1] if reply.strip() else ""
         nums = re.findall(r"\d+(?:\.\d+)?", last)
-        if "none" in last.lower() or len(nums) < 2:
-            return None
-        x, y = round(float(nums[-2])), round(float(nums[-1]))
-        return (x, y) if 0 <= x <= 1000 and 0 <= y <= 1000 else None
+        spot = None
+        if "none" not in last.lower() and len(nums) >= 2:
+            x, y = round(float(nums[-2])), round(float(nums[-1]))
+            spot = (x, y) if 0 <= x <= 1000 and 0 <= y <= 1000 else None
+        # the frame it looked at: iPhone 11, 2026-11-18 a tapon went to 'rednote' although the actor's screenshot
+        # showed Notes; the layout had likely changed since (Spotlight results load late)
+        self.trace.write(frame, kind="locate", question=question, reply=reply[-120:], spot=spot)
+        return spot
 
     async def _home(self) -> list[tuple[int, int]]:
         """Home Screen in one action: tap the AssistiveTouch button, then Home in its menu, each located on the
@@ -1229,7 +1245,8 @@ class Agent:
         iPhone 11 Calculator, 2026-11-18: asked one key at a time the actor found 16/16 keys, but writing a
         7-tap sequence of coordinates itself it got 0/16 sequences right (1 2 8 came out as 1 2 3)."""
         distinct = list(dict.fromkeys(labels))
-        spots = await asyncio.gather(*(self._locate(f"Where is the center of the key labeled '{k}'?") for k in distinct))
+        spots = await asyncio.gather(*(self._locate(f"Where is the center of the key labeled '{k}'?", by_text=True)
+                                       for k in distinct))
         missing = [k for k, p in zip(distinct, spots, strict=True) if p is None]
         if missing:
             raise ValueError(f"could not find key(s) {' '.join(missing)} on screen")
@@ -1267,7 +1284,7 @@ class Agent:
             case "key": await self.phone.key(a["combo"])
             case "home": a["taps"] = await self._home()
             case "tapon":
-                spot = await self._locate(f"Where is the center of the {a['what']}?")
+                spot = await self._locate(f"Where is the center of the {a['what']}?", by_text=True)
                 if spot is None:
                     raise ValueError(f"tapon: could not find {a['what']!r} on screen")
                 a["taps"] = [spot]
