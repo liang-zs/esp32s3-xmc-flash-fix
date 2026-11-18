@@ -65,3 +65,9 @@ def test_type_refuses_non_ascii(tmp_path):
     with pytest.raises(RuntimeError, match="ASCII"):
         asyncio.run(p.type("长安姑娘"))
     assert p.device.sent == []
+
+
+def test_clear_field_selects_deletes_and_deletes_to_line_start(tmp_path):
+    p = phone(tmp_path, [])
+    asyncio.run(p.clear_field())
+    assert p.device.sent == ["key cmd+a", "key backspace", "key cmd+backspace"]

@@ -272,13 +272,12 @@ Therefore, absence of the on-screen keyboard does not
 necessarily mean that the input is unfocused.
 
 STEP H:
-If an existing query is present, clear or replace it.
+If an existing query is present (Spotlight keeps the last one),
+empty the field first:
 
-You may use:
+DO: clear
 
-DO: key cmd+a
-
-followed by a separate action:
+and on the next turn:
 
 DO: type Settings
 
@@ -338,15 +337,11 @@ Before using "type":
 - Do not mistake the absence of the soft keyboard
   for a definite typing failure.
 
-For an existing search term:
+For an existing search term in a focused field:
 
-DO: tap X Y precise
+DO: clear
 
 On the next turn:
-
-DO: key cmd+a
-
-On the following turn:
 
 DO: type Settings
 
@@ -543,6 +538,8 @@ path X1 Y1 X2 Y2 X3 Y3 ...
 circle X Y R
 type TEXT
 pinyin LETTERS
+clear        (empties the focused text field; use it instead of
+              cmd+a or the field's x button)
 key COMBO
 home
 back
@@ -608,7 +605,7 @@ META = ("t", "thought", "thought_zh", "think_s", "act_s", "shot", "_shot", "chan
 # action name -> argument names; numeric arguments are 0-1000 screen coordinates
 ACTIONS = {"tap": ("x", "y"), "swipe": ("x1", "y1", "x2", "y2"), "circle": ("x", "y", "r"), "path": ("points",),
            "type": ("text",), "pinyin": ("text",), "key": ("combo",), "done": ("answer",), "fail": ("reason",),
-           "home": (), "back": (), "wait": (), "replan": ()}
+           "home": (), "back": (), "wait": (), "replan": (), "clear": ()}
 TEXT_ARGS = ("text", "combo", "answer", "reason")
 
 
@@ -1095,6 +1092,7 @@ class Agent:
             case "circle": await self.phone.drag(circle(p("x"), p("y"), p("r"), self.screen.aspect))
             case "type": await self.phone.type(a["text"])
             case "pinyin": await self.phone.pinyin(a["text"])
+            case "clear": await self.phone.clear_field()
             case "key": await self.phone.key(a["combo"])
             case "home": await self.phone.go_home()
             case "back": await self.phone.go_back()

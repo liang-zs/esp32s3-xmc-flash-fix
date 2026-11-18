@@ -53,6 +53,7 @@ function describeStep(s) {
     type: [`Type “${s.text}”`, `输入“${s.text}”`],
     key: [`Press ${s.combo}`, `按 ${s.combo}`],
     pinyin: [`Type Chinese (pinyin “${s.text}”)`, `拼音输入“${s.text}”`],
+    clear: ["Clear the text field", "清空输入框"],
     home: ["Go to the Home Screen", "回到主屏幕"],
     back: ["Go back", "返回"],
     wait: ["Wait for the screen", "等待画面加载"],

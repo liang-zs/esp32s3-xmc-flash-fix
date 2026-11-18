@@ -149,3 +149,7 @@ def test_think_reason_order():
     agent.steps = [{"action": "tap", "x": 1, "y": 1, "changed": False}]
     assert agent._think_reason() == "missed"
     assert agent._think_reason("rejected") == "rejected"
+
+
+def test_clear_action_parses():
+    assert parse_command("clear") == {"action": "clear"}

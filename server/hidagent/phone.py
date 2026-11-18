@@ -260,6 +260,13 @@ class Phone:
             await asyncio.sleep(IME_SWITCH)
             await self.device.send("key ctrl+space")
 
+    async def clear_field(self) -> None:
+        """Empty the focused text field: select all and delete, then cmd+backspace (delete to the start of the
+        line) for when select-all did not take. iPhone 11, 2026-11-18: Spotlight reopens with the last query and
+        the agent spent up to 10 rounds on cmd+a / the x button, as the selection is hard to see."""
+        for combo in ("cmd+a", "backspace", "cmd+backspace"):
+            await self.device.send(f"key {combo}")
+
     async def key(self, combo: str) -> None:
         await self.device.send(f"key {combo}")
 
