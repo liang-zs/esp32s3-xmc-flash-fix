@@ -88,6 +88,10 @@ PLAN PROGRESS:
   already works on the next step. Still needs actions -> DONE: no.
 - Say yes as soon as the screen shows the result; do not wait for
   another round. Never say yes for a step whose result you cannot see.
+- The goal outranks the plan. If this screenshot already shows the
+  goal reached (e.g. the result the user asked for is on screen),
+  finish now with DO: done <answer>, even if plan steps are left.
+  Never clear or undo a screen that already answers the goal.
 
 IMPORTANT:
 - Output exactly ONE DO line per response.
@@ -689,6 +693,8 @@ class BlindError(RuntimeError):
 
 
 FAST_ROUNDS = 3  # rounds on one plan step after which the actor thinks again
+GOAL_CHECK = ("First look at the screenshot: if it already shows the goal reached (e.g. the result asked for), "
+              "reply DO: done <answer> now, even with plan steps left; never undo it.\n")
 GRID_NOTE = ("\n\nThe screenshot has thin cyan grid lines every 100 units of the 0-1000 scale, labeled in "
              "yellow along the top and left edges. Read tap positions off them. They are not part of the screen.")
 
@@ -1071,7 +1077,8 @@ class Agent:
                             + effect.get(s.get("changed"), "")
                             for s in self.steps[-8:] if "plan" not in s) or "(none)"
         prompt = (f"Goal: {self.task}\n\n{self._progress()}\n\nRecent actions:\n{history}\n\n"
-                  "Next action? Start with DONE: yes or no (is the [now] step finished on this screen?).")
+                  f"{GOAL_CHECK}Next action? Start with DONE: yes or no (is the [now] step finished on this "
+                  "screen?).")
         retry = ""  # why the previous reply in this round was refused
         for attempt in range(3):  # retry unparseable replies, a little less deterministically
             # routine step: answer fast; think it through when there is a reason to look harder
