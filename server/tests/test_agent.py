@@ -266,3 +266,61 @@ def test_press_taps_a_digit_again_when_the_screen_did_not_change_but_never_an_op
     asyncio.run(agent._do(act))
     assert agent.phone.taps == [100, 100, 200, 300]  # 1 tapped twice, x once
     assert act["retapped"] == ["1"] and act["registered"] == [True, True, False]
+
+
+def _home_agent(answers):
+    """An agent whose locate questions are answered from `answers` (button, menu Home) and whose phone logs."""
+    from hidagent.agent import Agent
+    from hidagent.debug import Trace
+
+    class Screen:
+        live, frame, aspect = True, b"jpeg", 0.46
+        async def settled(self, **kw):
+            pass
+
+    class Actor:
+        model, fast_extra, last_usage = "fake", {"thinking": {"type": "disabled"}}, {}
+        async def chat(self, system, text, image=None, max_tokens=600, temperature=0, fast=False):
+            return answers["home" if "menu is open" in text else "button"]
+
+    class Phone:
+        def __init__(self):
+            self.did = []
+        async def tap(self, x, y, aim=False):
+            self.did.append(("tap", round(x * 1000), round(y * 1000)))
+        async def go_home(self):
+            self.did.append(("swipe home",))
+
+    return Agent(phone=Phone(), screen=Screen(), actor=Actor(), planner=None, trace=Trace(None))
+
+
+def test_home_taps_assistivetouch_then_its_home_item():
+    import asyncio
+    agent = _home_agent({"button": "880 770", "home": "570 855"})
+    act = {"action": "home"}
+    asyncio.run(agent._do(act))
+    assert agent.phone.did == [("tap", 880, 770), ("tap", 570, 855)] and act["taps"] == [(880, 770), (570, 855)]
+
+
+def test_home_without_assistivetouch_falls_back_to_the_swipe():
+    import asyncio
+    agent = _home_agent({"button": "none", "home": "none"})
+    asyncio.run(agent._do({"action": "home"}))
+    assert agent.phone.did == [("swipe home",)]
+
+
+def test_home_fails_when_the_menu_does_not_open():
+    import asyncio
+
+    import pytest
+    agent = _home_agent({"button": "880 770", "home": "none"})
+    with pytest.raises(ValueError, match="menu did not open"):
+        asyncio.run(agent._do({"action": "home"}))
+    assert agent.phone.did == [("tap", 880, 770)]
+
+
+def test_home_with_the_menu_already_open_taps_its_home_item():
+    import asyncio
+    agent = _home_agent({"button": "none", "home": "570 855"})
+    asyncio.run(agent._do({"action": "home"}))
+    assert agent.phone.did == [("tap", 570, 855)]

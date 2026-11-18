@@ -42,7 +42,9 @@ write a short numbered plan (at most 6 steps) of what to do on screen. Plain tex
 Plan only what the goal needs, from what you can see; never invent accounts, emails, logins or
 screens you have not seen. Later steps can stay general (e.g. "Draw the face on the canvas").
 To open an app, prefer search over paging through home screens: tap the "Search" pill above
-the dock (or swipe down from the middle of the home screen), type the app name, tap the result."""
+the dock (or swipe down from the middle of the home screen), type the app name, tap the result.
+To reach the Home Screen write the step as "Go to the Home Screen": the actor does it in one action
+through AssistiveTouch. Never plan a swipe up from the bottom edge (it does not work on this phone)."""
 
 
 ACTOR_PROMPT = """You are an AI agent controlling a real iPhone 11
@@ -142,35 +144,17 @@ Important known behavior:
 - Ordinary mouse movement works.
 - Mouse clicking works.
 - Horizontal and vertical dragging can work.
-- Bottom-edge Home gestures are unreliable.
-- The built-in "home" action has failed in testing.
-- AssistiveTouch has been configured so that tapping
-  its floating button returns to the Home Screen.
-- Tapping the visible AssistiveTouch floating button
-  has been successfully tested.
+- Bottom-edge Home swipes are unreliable on this device.
 
-Therefore:
+Therefore, to go to the Home Screen from anywhere:
 
-When you need to leave the current app:
+DO: home
 
-1. Look for the floating AssistiveTouch button.
-2. Identify its CURRENT position in the screenshot.
-3. Tap the center of that button using precise targeting.
-4. Wait for the next screenshot.
-5. Verify that the Home Screen appeared.
-6. Only then continue with Spotlight search.
-
-Do not assume the floating AssistiveTouch button is
-always in the same position.
-
-Never use an arbitrary fixed coordinate for AssistiveTouch.
-
-Avoid using the "home" action or bottom-edge Home swipe
-on this device.
-
-If the AssistiveTouch button cannot be identified,
-do not guess its position. Reinspect the screenshot
-or report that navigation is blocked.
+That is ONE action: the system finds the floating AssistiveTouch
+button, opens its menu and taps Home for you. Do not tap the
+AssistiveTouch button or its menu yourself, and do not swipe up
+from the bottom edge. Check the next screenshot: if the Home Screen
+did not appear, try DO: home once more before anything else.
 
 ==================================================
 4. APP LANGUAGE MAPPING
@@ -242,7 +226,7 @@ Determine whether the Home Screen is already visible.
 
 STEP B:
 If inside another app, return to the Home Screen
-using the visible AssistiveTouch floating button.
+with DO: home.
 
 STEP C:
 Once on the Home Screen, look for the Search button
@@ -459,14 +443,14 @@ CASE 4:
 The user requested Notes but the phone is still in Settings.
 
 Recovery:
-Find AssistiveTouch, return Home, then open Spotlight.
+DO: home, then open Spotlight.
 
 CASE 5:
 A Home swipe did nothing.
 
 Recovery:
 Do not repeat the Home swipe.
-Use the visible AssistiveTouch button instead.
+Use DO: home instead.
 
 CASE 6:
 A swipe did not change the screen.
@@ -574,20 +558,16 @@ APP NOTES:
 - The app ignores the keyboard ("type" does nothing there).
 
 NOTE:
-Although "home" is recognized by the software,
-avoid using it on this specific device because its
-bottom-edge gesture is unreliable.
-
-Use AssistiveTouch instead.
+"home" goes to the Home Screen through AssistiveTouch
+in one action; use it whenever you need the Home Screen.
 
 All coordinates must use the 0-1000 scale.
 
 Examples:
 
-THINK: I can see the AssistiveTouch floating button
-on the right side of the screen. I will tap it to
-return to the Home Screen.
-DO: tap 945 550 precise
+THINK: Notes is open, but I need the Home Screen to
+open another app.
+DO: home
 
 THINK: The Home Screen is visible and there is
 a Search button above the Dock.
@@ -711,6 +691,9 @@ class BlindError(RuntimeError):
 
 
 FAST_ROUNDS = 3  # rounds on one plan step after which the actor thinks again
+AT_BUTTON_Q = ("Where is the center of the AssistiveTouch floating button (a translucent gray rounded square "
+               "with a white circle in it, floating over the screen; not the small gray mouse pointer dot)?")
+AT_HOME_Q = "The AssistiveTouch menu is open. Where is the center of its Home item (icon with the label Home)?"
 LOCATE_PROMPT = ("You locate keys on iPhone screenshots. Coordinates use a 0-1000 scale for x (left to right) "
                  "and y (top to bottom). Reply with the center of the key the user names.")
 GOAL_CHECK = ("First look at the screenshot: if it shows the goal reached by the actions of this task (e.g. the "
@@ -1134,34 +1117,60 @@ class Agent:
                  time.time() - started)
         return hit
 
+    async def _locate(self, question: str) -> tuple[int, int] | None:
+        """One fast question about the current frame: where is <thing>? (0-1000), None if it is not there."""
+        frame = self.screen.frame
+        image = vision.grid(frame) if self.grid else frame
+        system = LOCATE_PROMPT + (GRID_NOTE if self.grid else "")
+        text = question + " If there is none, answer: none. Otherwise answer with one line: X Y"
+        started = time.time()
+        reply = await (self.actor.chat(system, text, image, max_tokens=300, fast=True)
+                       if getattr(self.actor, "fast_extra", None) else self.actor.chat(system, text, image))
+        self.usage["calls"] = self.usage.get("calls", 0) + 1
+        self.usage["locate_s"] = round(self.usage.get("locate_s", 0) + time.time() - started, 2)
+        for k, v in (getattr(self.actor, "last_usage", {}) or {}).items():
+            self.usage[k] = self.usage.get(k, 0) + v
+        last = reply.strip().splitlines()[-1] if reply.strip() else ""
+        nums = re.findall(r"\d+(?:\.\d+)?", last)
+        if "none" in last.lower() or len(nums) < 2:
+            return None
+        x, y = round(float(nums[-2])), round(float(nums[-1]))
+        return (x, y) if 0 <= x <= 1000 and 0 <= y <= 1000 else None
+
+    async def _home(self) -> list[tuple[int, int]]:
+        """Home Screen in one action: tap the AssistiveTouch button, then Home in its menu, each located on the
+        current frame. iPhone 11, 2026-11-18: going home took the actor 2-4 rounds (button, look, Home, look,
+        misses in between); cmd+h does nothing on iPhone. Offline: button found 8/8, menu Home 8/8 (the button
+        moves between runs, so it is never a fixed position). No button: the old bottom-edge swipe."""
+        button = await self._locate(AT_BUTTON_Q)
+        if button is None:  # the menu may be open already (it hides the button)
+            item = await self._locate(AT_HOME_Q)
+            if item is not None:
+                await self.phone.tap(item[0] / 1000, item[1] / 1000, aim=True)
+                log.info("[HOME] AssistiveTouch menu was open; Home at %s", item)
+                return [item]
+            log.warning("[HOME] no AssistiveTouch button on screen; swiping up from the bottom edge")
+            await self.phone.go_home()
+            return [(500, 995), (500, 600)]
+        await self.phone.tap(button[0] / 1000, button[1] / 1000, aim=True)
+        await self.screen.settled(quiet=0.2, least=0.5, most=1.5)
+        item = await self._locate(AT_HOME_Q)
+        if item is None:
+            raise ValueError("home: the AssistiveTouch menu did not open (no Home item on screen)")
+        await self.phone.tap(item[0] / 1000, item[1] / 1000, aim=True)
+        log.info("[HOME] AssistiveTouch at %s, Home at %s", button, item)
+        return [button, item]
+
     async def _locate_keys(self, labels: list[str]) -> list[tuple[int, int]]:
         """Positions (0-1000) of keypad keys named by label, one fast question per distinct label, in parallel.
         iPhone 11 Calculator, 2026-11-18: asked one key at a time the actor found 16/16 keys, but writing a
         7-tap sequence of coordinates itself it got 0/16 sequences right (1 2 8 came out as 1 2 3)."""
-        frame = self.screen.frame
-        image = vision.grid(frame) if self.grid else frame
-        system = LOCATE_PROMPT + (GRID_NOTE if self.grid else "")
-
-        async def one(label: str) -> tuple[int, int]:
-            started = time.time()
-            reply = await (self.actor.chat(system, f"Where is the center of the key labeled '{label}'? "
-                                           "Answer with one line: X Y", image, max_tokens=300, fast=True)
-                           if getattr(self.actor, "fast_extra", None) else
-                           self.actor.chat(system, f"Where is the center of the key labeled '{label}'? "
-                                           "Answer with one line: X Y", image))
-            self.usage["calls"] = self.usage.get("calls", 0) + 1
-            self.usage["locate_s"] = round(self.usage.get("locate_s", 0) + time.time() - started, 2)
-            for k, v in (getattr(self.actor, "last_usage", {}) or {}).items():
-                self.usage[k] = self.usage.get(k, 0) + v
-            nums = re.findall(r"\d+(?:\.\d+)?", reply.strip().splitlines()[-1] if reply.strip() else "")
-            if len(nums) < 2:
-                raise ValueError(f"could not find key {label!r} on screen: {reply[:80]!r}")
-            x, y = round(float(nums[-2])), round(float(nums[-1]))
-            if not (0 <= x <= 1000 and 0 <= y <= 1000):
-                raise ValueError(f"key {label!r} located off screen at {x} {y}")
-            return x, y
-
-        found = dict(zip(set(labels), await asyncio.gather(*map(one, set(labels))), strict=True))
+        distinct = list(dict.fromkeys(labels))
+        spots = await asyncio.gather(*(self._locate(f"Where is the center of the key labeled '{k}'?") for k in distinct))
+        missing = [k for k, p in zip(distinct, spots, strict=True) if p is None]
+        if missing:
+            raise ValueError(f"could not find key(s) {' '.join(missing)} on screen")
+        found = dict(zip(distinct, spots, strict=True))
         log.info("[PRESS] %s", {k: found[k] for k in labels})
         return [found[k] for k in labels]
 
@@ -1193,7 +1202,7 @@ class Agent:
                         hit = await self._press_key(label, x, y)
                     a["registered"].append(hit)
             case "key": await self.phone.key(a["combo"])
-            case "home": await self.phone.go_home()
+            case "home": a["taps"] = await self._home()
             case "back": await self.phone.go_back()
             case "wait": pass
             case other: raise ValueError(f"unknown action {other!r}")
@@ -1207,7 +1216,7 @@ def _pointer_path(act: dict) -> list[tuple[float, float]]:
         case "swipe": return [f(act["x1"], act["y1"]), f(act["x2"], act["y2"])]
         case "path": return [f(*p) for p in act["points"]]
         case "circle": return [f(act["x"] + act["r"], act["y"])]
-        case "home": return [(0.5, 0.995), (0.5, 0.6)]
+        case "home": return [f(x, y) for x, y in act.get("taps", [(500, 995), (500, 600)])]
         case "back": return [(0.005, 0.45), (0.6, 0.45)]
         case "press": return [f(x, y) for x, y in act.get("taps", [])]
         case _: return []
