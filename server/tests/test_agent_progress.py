@@ -101,3 +101,18 @@ def test_last_step_done_marks_everything_done():
     a._advance(None, done=True)  # nothing past the end
     assert a.plan_step == 6 and len(a.completed) == 5
     assert "[now]" not in a._progress()
+
+
+def test_done_through_moves_to_the_step_after_the_last_finished_one():
+    # iPhone 11, 2026-11-18: Settings reopened straight on About; one step per round sent the agent Home and
+    # back into Settings. "DONE: yes through 3" now covers steps 1-3 at once.
+    acts = parse_actions("DONE: yes through 3\nTHINK: Settings opened on About\nDO: home")
+    assert acts[0]["done"] is True and acts[0]["done_through"] == 3
+    a = agent()
+    a._advance(None, done=True, through=3)
+    assert a.plan_step == 4 and a.completed == plan_steps(PLAN)[:3]
+    a._advance(None, done=True, through=2)  # an older step number: just one more step
+    assert a.plan_step == 5
+    a._advance(None, done=True, through=99)  # past the end: everything done, no crash
+    assert a.plan_step == 6 and len(a.completed) == 5
+    assert "done_through" not in parse_actions("DONE: no through 3\nTHINK: x\nDO: wait")[0]

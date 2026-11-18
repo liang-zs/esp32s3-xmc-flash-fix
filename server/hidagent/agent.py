@@ -65,7 +65,8 @@ You must follow these rules carefully.
 
 Reply in exactly this format:
 
-DONE: <yes or no: does this screenshot show the [now] plan step finished?>
+DONE: <yes or no: does this screenshot show the [now] plan step finished?
+      "yes through N" when it shows plan steps up to N finished>
 THINK: <Briefly describe what is visible, whether the previous
 action succeeded, and why you chose the next action.>
 DO: <exactly one supported action>
@@ -90,6 +91,12 @@ PLAN PROGRESS:
   already works on the next step. Still needs actions -> DONE: no.
 - Say yes as soon as the screen shows the result; do not wait for
   another round. Never say yes for a step whose result you cannot see.
+- When the screenshot shows several steps finished at once, say
+  DONE: yes through N (N = the last finished step). Example: the plan
+  is 2 [now] open Settings, 3 [todo] tap General then About; Settings
+  opens straight on the About page (apps reopen on the page you left)
+  -> DONE: yes through 3. Then never redo steps 2-3: going Home and
+  reopening Settings just shows the same page again.
 - The goal outranks the plan. If this screenshot already shows the
   goal reached by this task's own actions (e.g. the result they
   computed), finish now with DO: done <answer>, even if plan steps
@@ -625,7 +632,7 @@ then observe the next screenshot before continuing.
 
 
 META = ("t", "thought", "thought_zh", "think_s", "act_s", "shot", "_shot", "changed",
-        "recovery", "step", "done")  # not part of the action
+        "recovery", "step", "done", "done_through")  # not part of the action
 
 # action name -> argument names; numeric arguments are 0-1000 screen coordinates
 ACTIONS = {"tap": ("x", "y"), "swipe": ("x1", "y1", "x2", "y2"), "circle": ("x", "y", "r"), "path": ("points",),
@@ -677,9 +684,12 @@ def parse_actions(text: str) -> list[dict]:
     if not acts:
         raise ValueError(f"no DO line in reply: {text[:200]}")
     acts[0] = {"thought": thought.group(1) if thought else "", "thought_zh": zh.group(1) if zh else "", **acts[0]}
-    done = re.search(r"^\s*DONE\s*[:：]\s*(yes|no|true|false|是|否)", text, re.M | re.I)
+    done = re.search(r"^\s*DONE\s*[:：]\s*(yes|no|true|false|是|否)([^\n]*)", text, re.M | re.I)
     if done:
         acts[0]["done"] = done.group(1).lower() in ("yes", "true", "是")
+        through = re.search(r"(?:through|thru|up to|to|至)\s*(?:step\s*)?(\d+)", done.group(2), re.I)
+        if acts[0]["done"] and through:
+            acts[0]["done_through"] = int(through.group(1))
     step = re.search(r"^\s*STEP\s*[:：]\s*(\d+)", text, re.M | re.I)  # older reply format
     if step:
         acts[0]["step"] = int(step.group(1))
@@ -917,7 +927,7 @@ class Agent:
 
         acts = await self._next_actions()
         done = len(self.completed)
-        self._advance(acts[0].get("step"), acts[0].get("done"))
+        self._advance(acts[0].get("step"), acts[0].get("done"), acts[0].get("done_through"))
         stall = await self._check_stall(len(self.completed) > done, acts[0])
         if stall is not Recovery.NONE:  # ABORT ends the task; after a REPLAN look again before acting
             return stall is Recovery.ABORT
@@ -1048,15 +1058,22 @@ class Agent:
         return (len(moves) == limit - 1 and all(_key(m) == _key(act) for m in moves)
                 and moves[-1].get("changed") is not True)
 
-    def _advance(self, step: int | None, done: bool | None = None) -> None:
-        """Move the plan forward by at most one step per round: when the actor says the [now] step is `done`
-        on screen, or (older replies) names a later `step`. A claimed jump from step 1 to 4 counts as one step,
-        so a confused reply can't skip work. Progress never goes back, so a familiar screen (e.g. Home after
-        "return to Home") can't send the agent back to step 1."""
+    def _advance(self, step: int | None, done: bool | None = None, through: int | None = None) -> None:
+        """Move the plan forward: one step when the actor says the [now] step is `done` on screen, or up to
+        `through` when it says the screen shows the steps up to there finished (Settings reopening straight on
+        About covers "open Settings" and "tap General, About"; iPhone 11, 2026-11-18: advancing one step there
+        sent the agent Home and back into Settings, which reopened on About again). A bare step number (older
+        replies) still moves one step: "STEP: 4" from step 1 skipped work. Progress never goes back."""
         steps = plan_steps(self.plan)
         if not steps:
             return
         if done is not None:  # a yes/no is easier to get right than a step number, even without thinking
+            if done and through and through >= self.plan_step:
+                step = min(through + 1, len(steps) + 1)
+                if step > self.plan_step:
+                    self.completed += steps[self.plan_step - 1:step - 1]
+                    self.plan_step = step
+                return
             step = self.plan_step + 1 if done else None
         if not step:
             return
@@ -1110,7 +1127,7 @@ class Agent:
     async def _next_actions(self) -> list[dict]:
         # actions and their effect only: echoing earlier thoughts makes the model repeat them instead of looking
         hidden = ("t", "plan", "plan_zh", "think_s", "act_s", "shot", "thought", "thought_zh", "changed",
-                  "recovery", "step", "done")
+                  "recovery", "step", "done", "done_through")
         effect = {True: " -> screen changed", False: " -> screen did NOT change"}
         history = "\n".join(json.dumps({k: v for k, v in s.items() if k not in hidden})[:300]
                             + effect.get(s.get("changed"), "")
