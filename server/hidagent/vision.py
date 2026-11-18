@@ -5,7 +5,6 @@ import logging
 
 from PIL import Image, ImageChops, ImageDraw, ImageFilter
 
-
 log = logging.getLogger(__name__)
 
 

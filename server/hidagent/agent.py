@@ -10,6 +10,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from . import vision
+from .apps import app_hints
 from .debug import Trace
 from .device import DeviceError
 from .llm import LLM, cost
@@ -1094,7 +1095,7 @@ class Agent:
         return (f"Already completed (verified earlier, NEVER redo):{done}\n\n" if done else "") + f"Plan:\n{plan}"
 
     async def _replan(self, stuck: bool = False) -> None:
-        prompt = f"Goal: {self.task}"
+        prompt = f"Goal: {self.task}" + (f"\n{hints}" if (hints := app_hints(self.task)) else "")
         if self.completed:
             prompt += ("\n\nAlready completed (verified, do NOT plan these again; plan only the remaining work):"
                        + "".join(f"\n- {s}" for s in self.completed))
@@ -1132,7 +1133,9 @@ class Agent:
         history = "\n".join(json.dumps({k: v for k, v in s.items() if k not in hidden})[:300]
                             + effect.get(s.get("changed"), "")
                             for s in self.steps[-8:] if "plan" not in s) or "(none)"
-        prompt = (f"Goal: {self.task}\n\n{self._progress()}\n\nRecent actions:\n{history}\n\n"
+        hints = app_hints(self.task)
+        goal = f"Goal: {self.task}" + (f"\n{hints}" if hints else "")
+        prompt = (f"{goal}\n\n{self._progress()}\n\nRecent actions:\n{history}\n\n"
                   f"{GOAL_CHECK}Next action? Start with DONE: yes or no (is the [now] step finished on this "
                   "screen?).")
         retry = ""  # why the previous reply in this round was refused
