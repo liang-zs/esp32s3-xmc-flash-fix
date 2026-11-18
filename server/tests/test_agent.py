@@ -285,13 +285,13 @@ def _home_agent(answers):
 
     class Phone:
         def __init__(self):
-            self.did = []
+            self.did, self.moves = [], []
         async def tap(self, x, y, aim=False):
             self.did.append(("tap", round(x * 1000), round(y * 1000)))
         async def go_home(self):
             self.did.append(("swipe home",))
-        async def point(self, x, y, aim=False):
-            self.did.append(("move", round(x * 1000), round(y * 1000)))
+        async def point(self, x, y, aim=False):  # moves without a click, kept apart from taps
+            self.moves.append((round(x * 1000), round(y * 1000)))
         async def double_tap(self, x, y, aim=False):
             self.did.append(("double", round(x * 1000), round(y * 1000)))
 
@@ -405,35 +405,21 @@ def test_home_by_double_tap_tries_twice_then_fails(monkeypatch):
     assert agent.phone.did == [("double", 750, 945), ("double", 750, 945)]
 
 
-def test_a_button_answer_next_to_the_mouse_pointer_is_the_pointer():
+def test_the_pointer_is_parked_in_the_middle_and_an_answer_there_is_the_pointer():
     import asyncio
 
     from hidagent.agent import AT_BUTTON_Q2
     agent = _home_agent({"button": "none", "home": "none"})
-    agent.at_double_tap_home = True
-    agent._pointer = (0.6, 0.6)
 
     async def chat(system, text, image=None, max_tokens=600, temperature=0, fast=False):
         if "Home item" in text:
             return "none"
-        return "750 950" if AT_BUTTON_Q2[:60] in text else "600 600"  # the old wording answered the pointer
+        return "750 950" if AT_BUTTON_Q2[:60] in text else "505 520"  # the old wording answered the pointer
     agent.actor.chat = chat
     assert asyncio.run(agent._locate_at_button()) == (750, 950)
+    assert agent.phone.moves == [(500, 500)] and agent.phone.did == []
 
     async def pointer_only(system, text, image=None, max_tokens=600, temperature=0, fast=False):
-        x, y = agent._pointer  # always answers wherever the pointer is
-        return "none" if "Home item" in text else f"{round(x * 1000) + 5} {round(y * 1000) - 2}"
+        return "none" if "Home item" in text else "505 520"
     agent.actor.chat = pointer_only
-    agent._pointer = (0.6, 0.6)
-    assert asyncio.run(agent._locate_at_button()) is None  # it follows the pointer aside: never the button
-
-
-def test_the_button_is_accepted_under_the_pointer_where_home_last_worked():
-    import asyncio
-    agent = _home_agent({"button": "750 945", "home": "none"})
-    agent._pointer = (0.75, 0.945)  # the pointer rests on the button after the last double tap
-    agent._at_button = (750, 945)
-    assert asyncio.run(agent._locate_at_button()) == (750, 945) and agent.phone.did == []
-    agent._at_button = None  # nothing known yet: move the pointer aside and look again
-    assert asyncio.run(agent._locate_at_button()) == (750, 945)
-    assert agent.phone.did == [("move", 40, 500)]
+    assert asyncio.run(agent._locate_at_button()) is None
