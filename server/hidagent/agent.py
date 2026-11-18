@@ -72,10 +72,10 @@ DO: <exactly one supported action>
 
 Example:
 
-DONE: no
-THINK: Spotlight is open, but the search field may not have focus.
-I will tap the search field before typing.
-DO: tapon Spotlight search field
+DONE: yes
+THINK: Spotlight is open with an empty search field, so the
+"open search" step is done. The field is focused already.
+DO: type Settings
 
 PLAN PROGRESS:
 - The plan you receive marks each step [done], [now] or [todo].
@@ -247,11 +247,11 @@ STEP F:
 Locate the Spotlight search text field.
 
 IMPORTANT:
-Opening Spotlight does NOT guarantee that its
-search field has keyboard focus.
-
-Always explicitly tap the search field before typing
-unless there is clear visual evidence it is already focused.
+Spotlight's search field has keyboard focus as soon as
+Spotlight opens, and keeps it after "clear". Type right
+away; do not tap the field first (on this iPhone 11 all
+38 recorded "type" actions worked without that tap).
+Tap the field only if a typed word did not appear.
 
 STEP G:
 Wait for another screenshot to check the input state.
@@ -319,9 +319,8 @@ Never report success before verifying the destination.
 Before using "type":
 
 - Confirm the intended text field is visible.
-- Focus that text field with a separate tap if needed.
-- Never assume the previously focused field
-  is still focused after navigating.
+- Spotlight's field is focused when it opens: type at once.
+  Other fields: tap them first if no cursor is shown.
 - If a previous query exists, clear it first.
 - Prefer English app names for system app search.
 - After typing, inspect the next screenshot.
@@ -579,11 +578,7 @@ THINK: The Home Screen is visible and there is
 a Search button above the Dock.
 DO: tapon Search pill above the Dock
 
-THINK: Spotlight is open. I should explicitly focus
-the search field before entering the app name.
-DO: tapon Spotlight search field
-
-THINK: The search field is focused and empty.
+THINK: Spotlight is open and its search field is empty.
 The user requested 备忘录, which is Notes in English.
 DO: type Notes
 
