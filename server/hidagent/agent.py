@@ -557,11 +557,15 @@ Then check the field: if a wrong word was picked, clear it and try a shorter phr
 Search terms that are English words or app names still use "type".
 
 APP NOTES:
-- Calculator: tapping + - x or / does not change the number shown;
-  the key only turns lighter. Tap an operator once, then go on with
-  the next number; never tap it again because the display looks
-  the same. A wrong digit: tap C once and enter that number again.
-  The app ignores the keyboard ("type" does nothing there).
+- Calculator: it opens showing the last result, so begin with a full
+  reset: tap the top-left key twice (C, then AC). The display reads 0.
+- C clears only the number being typed; a pending + - x / stays and is
+  applied to the next number (128 x, C, 128 x shows 16,384). To start
+  over, always tap the top-left key twice, never C alone.
+- Tapping + - x or / does not change the number shown; the key only
+  turns lighter. Tap an operator once, then go on with the next
+  number; never tap it again because the display looks the same.
+- The app ignores the keyboard ("type" does nothing there).
 
 NOTE:
 Although "home" is recognized by the software,
