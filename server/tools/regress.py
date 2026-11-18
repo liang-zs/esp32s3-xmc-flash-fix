@@ -1,0 +1,77 @@
+"""Run the task set in tools/tasks.json on the phone through a running server and report per task.
+
+    uv run python tools/regress.py                      # every task once
+    uv run python tools/regress.py -n 3 calculator ...  # chosen tasks, three times each
+
+Each run starts from the Home Screen. A task passes when the agent finishes with `done` and, when the
+task lists `expect`, its answer contains one of those strings. Results are appended to
+~/.hidagent/regress.jsonl with the git commit, so versions can be compared later.
+"""
+
+import argparse
+import json
+import subprocess
+import time
+from pathlib import Path
+
+import httpx
+
+HERE = Path(__file__).parent
+OUT = Path.home() / ".hidagent" / "regress.jsonl"
+
+
+def status(c: httpx.Client) -> dict:
+    return c.get("/api/status").json()
+
+
+def run_one(c: httpx.Client, task: dict) -> dict:
+    c.post("/api/agent/clear")
+    c.post("/api/home")
+    time.sleep(3)
+    r = c.post("/api/agent", json={"text": task["task"]})
+    r.raise_for_status()
+    time.sleep(3)
+    while (s := status(c))["agent"]["running"]:
+        time.sleep(3)
+    run = c.get("/api/runs", params={"last": 1}).json()["runs"][-1]
+    last = s["agent"]["steps"][-1] if s["agent"]["steps"] else {}
+    answer = str(last.get("answer", ""))
+    ok = run["result"] == "done" and (not task.get("expect") or any(e in answer for e in task["expect"]))
+    return {"id": task["id"], "ok": ok, "result": run["result"], "answer": answer[:200],
+            "reason": run.get("reason", ""), "seconds": run["seconds"], "actions": run["actions"],
+            "calls": run.get("calls"), "fast_calls": run.get("fast_calls"), "llm_s": run.get("llm_s"),
+            "cost": run.get("cost"), "think": {k: v for k, v in run.items() if k.startswith("think_")}}
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("ids", nargs="*", help="task ids (default: all)")
+    ap.add_argument("-n", type=int, default=1, help="runs per task")
+    ap.add_argument("--url", default="http://localhost:8890")
+    args = ap.parse_args()
+    tasks = json.loads((HERE / "tasks.json").read_text())
+    if args.ids:
+        tasks = [t for t in tasks if t["id"] in args.ids]
+    commit = subprocess.run(["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True).stdout.strip()
+    with httpx.Client(base_url=args.url, timeout=30) as c:
+        s = status(c)
+        if not (s["board"]["connected"] and s["screen"]):
+            raise SystemExit(f"phone not ready: board {s['board']['connected']}, screen {s['screen']}")
+        rows = []
+        for task in tasks:
+            for _ in range(args.n):
+                row = {"time": time.strftime("%Y-%m-%d %H:%M:%S"), "commit": commit, **run_one(c, task)}
+                rows.append(row)
+                OUT.parent.mkdir(exist_ok=True)
+                with OUT.open("a") as f:
+                    f.write(json.dumps(row, ensure_ascii=False) + "\n")
+                print(f"{'PASS' if row['ok'] else 'FAIL'} {row['id']:16s} {row['seconds']:6.1f}s "
+                      f"{row['actions']:3d} acts  {row['result']:7s} {row['answer'] or row['reason']}"[:200],
+                      flush=True)
+    ok = [r for r in rows if r["ok"]]
+    print(f"\n{len(ok)}/{len(rows)} passed, {commit}; average {sum(r['seconds'] for r in rows) / len(rows):.0f} s, "
+          f"cost {sum(r['cost'] or 0 for r in rows):.3f}")
+
+
+if __name__ == "__main__":
+    main()

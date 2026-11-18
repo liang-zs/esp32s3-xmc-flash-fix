@@ -1,0 +1,19 @@
+[
+  {"id": "settings-chain", "task": "打开设置，进入通用，再进入关于本机，然后回到主屏幕，打开备忘录",
+   "note": "easy baseline: plan with five steps"},
+  {"id": "ios-version", "task": "打开设置，查看本机的 iOS 版本号，并告诉我", "expect": ["16."],
+   "note": "read an answer off the screen"},
+  {"id": "calculator", "task": "打开计算器，计算 128 乘以 37，告诉我结果", "expect": ["4736", "4,736"],
+   "note": "precise taps on a keypad; one wrong key changes the result"},
+  {"id": "world-clock", "task": "打开时钟，切换到世界时钟页面，告诉我列出了哪些城市",
+   "note": "tab bar at the bottom edge, read a list"},
+  {"id": "display-mode", "task": "打开设置，找到显示与亮度，告诉我当前是浅色模式还是深色模式",
+   "expect": ["浅色", "深色", "Light", "Dark", "light", "dark"],
+   "note": "scroll a long list; Chinese name -> English Settings row"},
+  {"id": "bilibili-search", "task": "打开哔哩哔哩，搜索长安姑娘，打开第一个视频",
+   "note": "third-party app, Chinese input through pinyin"},
+  {"id": "safari-url", "task": "打开 Safari，访问 apple.com/cn，告诉我页面上最大的标题是什么",
+   "note": "address bar, typing a URL, page load"},
+  {"id": "notes-chinese", "task": "打开备忘录，新建一条备忘录，输入测试笔记，然后回到主屏幕",
+   "note": "creates a note each run (delete afterwards); pinyin inside a text editor"}
+]
