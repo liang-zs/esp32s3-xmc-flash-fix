@@ -89,9 +89,11 @@ PLAN PROGRESS:
 - Say yes as soon as the screen shows the result; do not wait for
   another round. Never say yes for a step whose result you cannot see.
 - The goal outranks the plan. If this screenshot already shows the
-  goal reached (e.g. the result the user asked for is on screen),
-  finish now with DO: done <answer>, even if plan steps are left.
-  Never clear or undo a screen that already answers the goal.
+  goal reached by this task's own actions (e.g. the result they
+  computed), finish now with DO: done <answer>, even if plan steps
+  are left. Never clear or undo a screen that answers the goal.
+  A value already shown when an app opens (Calculator keeps its last
+  result) is left over from before: it never counts as the answer.
 
 IMPORTANT:
 - Output exactly ONE DO line per response.
@@ -693,8 +695,9 @@ class BlindError(RuntimeError):
 
 
 FAST_ROUNDS = 3  # rounds on one plan step after which the actor thinks again
-GOAL_CHECK = ("First look at the screenshot: if it already shows the goal reached (e.g. the result asked for), "
-              "reply DO: done <answer> now, even with plan steps left; never undo it.\n")
+GOAL_CHECK = ("First look at the screenshot: if it shows the goal reached by the actions of this task (e.g. the "
+              "result they computed), reply DO: done <answer> now, even with plan steps left; never undo it. "
+              "Something already on screen when an app opened is left over from before and does not count.\n")
 GRID_NOTE = ("\n\nThe screenshot has thin cyan grid lines every 100 units of the 0-1000 scale, labeled in "
              "yellow along the top and left edges. Read tap positions off them. They are not part of the screen.")
 
