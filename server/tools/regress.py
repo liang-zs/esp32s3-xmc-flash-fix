@@ -3,8 +3,9 @@
     uv run python tools/regress.py                      # every task once
     uv run python tools/regress.py -n 3 calculator ...  # chosen tasks, three times each
 
-Each run starts from the Home Screen. A task passes when the agent finishes with `done` and, when the
-task lists `expect`, its answer contains one of those strings. Results are appended to
+Each run starts from the Home Screen (the agent's AssistiveTouch home). A task passes when the agent finishes
+with `done` and, when the task lists `expect`, its answer contains one of those strings; with `min_actions`, a
+pass in fewer actions is SUSPECT (e.g. an answer left on screen by the previous run). Results are appended to
 ~/.hidagent/regress.jsonl with the git commit, so versions can be compared later.
 """
 
@@ -24,10 +25,24 @@ def status(c: httpx.Client) -> dict:
     return c.get("/api/status").json()
 
 
+def judge(task: dict, result: str, answer: str, actions: int) -> str:
+    """PASS, FAIL or SUSPECT (done and right, but in fewer actions than the task needs: e.g. Calculator still
+    showing the answer from the previous run, read off without calculating)."""
+    if result != "done" or (task.get("expect") and not any(e in answer for e in task["expect"])):
+        return "FAIL"
+    return "SUSPECT" if actions < task.get("min_actions", 0) else "PASS"
+
+
+def go_home(c: httpx.Client) -> None:
+    """Start from the Home Screen: the agent's AssistiveTouch home, else the bottom-edge swipe."""
+    if c.post("/api/agent/home", timeout=60).status_code != 200:
+        c.post("/api/home")
+    time.sleep(2)
+
+
 def run_one(c: httpx.Client, task: dict) -> dict:
     c.post("/api/agent/clear")
-    c.post("/api/home")
-    time.sleep(3)
+    go_home(c)
     r = c.post("/api/agent", json={"text": task["task"]})
     r.raise_for_status()
     time.sleep(3)
@@ -36,8 +51,9 @@ def run_one(c: httpx.Client, task: dict) -> dict:
     run = c.get("/api/runs", params={"last": 1}).json()["runs"][-1]
     last = s["agent"]["steps"][-1] if s["agent"]["steps"] else {}
     answer = str(last.get("answer", ""))
-    ok = run["result"] == "done" and (not task.get("expect") or any(e in answer for e in task["expect"]))
-    return {"id": task["id"], "ok": ok, "result": run["result"], "answer": answer[:200],
+    verdict = judge(task, run["result"], answer, run["actions"])
+    return {"id": task["id"], "ok": verdict == "PASS", "verdict": verdict, "result": run["result"],
+            "answer": answer[:200],
             "reason": run.get("reason", ""), "seconds": run["seconds"], "actions": run["actions"],
             "calls": run.get("calls"), "fast_calls": run.get("fast_calls"), "llm_s": run.get("llm_s"),
             "cost": run.get("cost"), "think": {k: v for k, v in run.items() if k.startswith("think_")}}
@@ -65,7 +81,7 @@ def main() -> None:
                 OUT.parent.mkdir(exist_ok=True)
                 with OUT.open("a") as f:
                     f.write(json.dumps(row, ensure_ascii=False) + "\n")
-                print(f"{'PASS' if row['ok'] else 'FAIL'} {row['id']:16s} {row['seconds']:6.1f}s "
+                print(f"{row['verdict']:7s} {row['id']:16s} {row['seconds']:6.1f}s "
                       f"{row['actions']:3d} acts  {row['result']:7s} {row['answer'] or row['reason']}"[:200],
                       flush=True)
     ok = [r for r in rows if r["ok"]]

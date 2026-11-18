@@ -1177,6 +1177,12 @@ class Agent:
         self.trace.write(frame, kind="locate", question=question, reply=reply[-120:], spot=spot)
         return spot
 
+    async def go_home(self) -> list[tuple[int, int]]:
+        """The home action outside a task (e.g. before a regression run starts)."""
+        if self.running:
+            raise RuntimeError("agent is running")
+        return await self._home()
+
     async def _home(self) -> list[tuple[int, int]]:
         """Home Screen in one action: tap the AssistiveTouch button, then Home in its menu, each located on the
         current frame. iPhone 11, 2026-11-18: going home took the actor 2-4 rounds (button, look, Home, look,

@@ -211,6 +211,16 @@ async def agent_start(t: Text):
     return {"ok": True}
 
 
+@app.post("/api/agent/home")
+async def agent_home():
+    """The agent's own home action (AssistiveTouch), e.g. to start a regression run from the Home Screen."""
+    try:
+        taps = await agent.go_home()
+    except (DeviceError, RuntimeError, ValueError) as e:
+        raise HTTPException(409, str(e)) from e
+    return {"ok": True, "taps": taps}
+
+
 @app.post("/api/agent/stop")
 async def agent_stop():
     """Emergency stop: cancel the agent and release the mouse button."""
