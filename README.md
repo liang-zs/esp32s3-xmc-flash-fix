@@ -13,7 +13,7 @@
                                         DeepSeek / 任意 OpenAI 兼容视觉模型
 ```
 
-## 当前状态（2026-11-16）
+## 当前状态（2026-11-18）
 
 | 能力 | 状态 | 依据 / 位置 |
 | --- | --- | --- |
@@ -21,9 +21,11 @@
 | DeepSeek 接入 | 可用 | `llm.py` 走 OpenAI 兼容 `/chat/completions`；`agent.py` 规划/执行两个角色可分别配模型 |
 | USB HID 鼠标 + 键盘 | 实机可用 | 固件侧，`device.py` 的协议对端；**固件源码不在本仓库** |
 | 精确点击 `aim=True` | 实机可用 | `phone.py` 闭环：从角落出发 → 找指针 → 修正，最多 3 轮再点击；iPhone 11 网格实测 15/18 点误差 ≤ 0.01（底部 Dock 行找不到指针） |
-| AssistiveTouch 回主屏 | 实机可用 | `agent.py:124-148` 的 prompt 规则；`phone.go_home()` |
-| Spotlight 搜英文 App 名 | 实机可用 | `agent.py` 中英映射表（备忘录=Notes、设置=Settings…）+ "先聚焦搜索框再 type" |
-| 连续多步任务 | 目视成功 | iPhone 11 上 Settings → General → About → Home → Notes 11 步 / 101 秒跑通（修复前 40 步）；单次运行，**非可靠性基准** |
+| 回主屏 `home` | 实机可用 | 程序定位 AssistiveTouch 悬浮按钮后原地双击（手机设「轻点两下 = 主屏幕」），约 6 秒；`agent.py` 的 `_home` |
+| 按名称点击 `tapon` | 实机可用 | 模型只描述目标（`tapon General row`），程序单独定位再点；离线 35/37 命中，模型自报坐标 22/37 |
+| 键盘 `press` | 实机可用 | `press 1 2 8 × 3 7 =`：按标签逐键定位后依次点击，没生效的数字键补点；计算器任务实机通过 |
+| Spotlight 搜英文 App 名 | 实机可用 | `apps.py` 中英映射表（含本机第三方 App），按任务提示给规划/执行模型；Spotlight 打开即可输入 |
+| 连续多步任务 | 实机多次通过 | `tools/regress.py` 跑 `tools/tasks.json`：settings-chain 87–142 秒、calculator 80 秒；另 6 个任务尚无结果，**非可靠性基准** |
 | XMC Flash `0x207018` 启动修复 | 单板实验性通过 | 不在本仓库：见 [esp32s3-xmc-flash-fix](https://github.com/liang-zs/esp32s3-xmc-flash-fix)，ESP-IDF v5.5.5 bootloader 补丁，5/5 冷启动 + `0x900000` 回读一致 |
 
 "实机可用"指在本人一台 iPhone 上人工确认过；没有自动化回归，也不代表换设备/换系统版本仍然成立。
@@ -52,7 +54,7 @@ iphone-agent/           给上游 legacy 分支用的补丁安装器（旧代，
 
 ## 快速开始
 
-前置条件：iPhone 系统语言为英文；已开启 AssistiveTouch 且**单击悬浮球 = 回主屏**；Mac 已装 [UxPlay](https://github.com/FDH2/UxPlay)；ESP32-S3 板已烧 HID 桥固件并连上同一 Wi-Fi。
+前置条件：iPhone 系统语言为英文；已开启 AssistiveTouch，「自定操作」设为**单点 = 打开菜单、轻点两下 = 主屏幕、长按 = 无**（长按别设锁屏：锁屏后 USB 挂起，agent 就动不了）；Mac 已装 [UxPlay](https://github.com/FDH2/UxPlay)；ESP32-S3 板已烧 HID 桥固件并连上同一 Wi-Fi。
 
 ```bash
 cd server
@@ -75,18 +77,23 @@ uv run --env-file .env python -m hidagent
 | `DEVICE_PORT` | `7300` | ESP32 板反向连接的端口 |
 | `AIRPLAY_NAME` | `iPhone Agent` | 投屏列表里显示的名字 |
 | `LLM_BASE_URL` / `LLM_MODEL` / `LLM_API_KEY` | — | 任意 OpenAI 兼容视觉模型；`ACTOR_*` / `PLANNER_*` 可按角色覆盖 |
-| `HIDAGENT_DEBUG` | `0` | `1` 时把每次运行的 prompt、回复、截图落到 `~/.hidagent/traces` |
+| `ACTOR_FAST_BODY` | — | 常规步骤不推理（DeepSeek：`{"thinking": {"type": "disabled"}}`）；删掉即一直推理 |
+| `ACTOR_GRID` | — | `1` 时给执行模型的截图画 100 单位坐标网格（trace 里保存原图） |
+| `AT_DOUBLE_TAP_HOME` | — | `1` = 手机上「轻点两下 = 主屏幕」已设好，`home` 用双击；不设则走菜单里的 Home |
+| `LLM_PRICE` / `LLM_PRICE_IDLE` / `LLM_PEAK_HOURS` | — | 计费（见下文「每次运行有统计」） |
+| `HIDAGENT_DEBUG` | `0` | `1` 时把每次运行的 prompt、回复、截图（含每次定位用的画面）落到 `~/.hidagent/traces` |
 | `HIDAGENT_DATA` | `~/.hidagent` | 标定文件与 trace 的根目录 |
 
 ## 关键设计（都是踩坑换来的）
 
 - **一轮只做一个动作**，做完必须重新截图确认。多动作连发会让失败无法归因。
-- **先聚焦再输入**：Spotlight 打开 ≠ 搜索框有焦点。`tap` 后紧跟 `type` 时，服务会先等画面稳定，若点击没引起任何变化就跳过输入、重新观察（`agent.py` 的 tap→type 保护）。
+- **Spotlight 打开即可输入**：录像里 38 次 `type` 全部生效，不管之前有没有点搜索框，所以不再先点一下。旧搜索词用 `clear`（全选、删除、删到行首）一步清掉。
 - **`aim=True` 是闭环**：iOS 指针有加速度，移动距离与鼠标单位不成正比，且误差随连续相对移动累积。所以精确点击先回角落再移动（落点可复现、可学习），然后左右轻推指针、用推后两帧找到它，偏差 > 0.008 就修正并重新确认，最多 3 轮。
 - **指针识别按形状挑**：iOS 指针静止一会儿就隐藏，所以只用刚移动过的两帧；变化区域里只认指针大小、实心的圆点，排除时钟图标秒针（细线）和 AssistiveTouch 按钮（过大）这类自己会动的东西。屏幕变化检测同理会屏蔽"模型思考期间就在动"的区域。
-- **计划进度只进不退**：actor 每轮报告 `STEP: n`，已完成的步骤标 `[done]` 并在重新规划后保留，避免回到主屏后从第 1 步重来。
-- **回主屏用 AssistiveTouch 单击**，不要用底部上滑或软件 home 动作——在测试机 iPhone 11 上反复失败。
-- **App 名必须用英文**：中文名在英文语系下搜不到；prompt 里内置了常见映射。
+- **计划进度只进不退**：actor 每轮先答 `DONE: yes/no`（当前步骤在截图上完成了没有），程序推进一步；截图同时证明多步完成时答 `DONE: yes through N`（例如「设置」直接停在「关于本机」）。单独报一个更大的步骤号只算一步，防止无凭据跳步。已完成的步骤标 `[done]` 并在重新规划后保留。截图已显示本任务算出的目标结果就直接 `done`，屏幕上上次留下的结果不算。
+- **回主屏 = 一个 `home` 动作**：先把指针停在屏幕中间（悬浮按钮总在边缘，答在中间的一定是指针），用两种问法并行定位悬浮按钮，原地双击；被当成单击弹出菜单就点菜单里的 Home。底部上滑在这台 iPhone 11 上不可靠，只作最后退路。`cmd+h`、全键盘控制对这块板子都无效（实测）。
+- **能叫出名字的就别给坐标**：模型在长上下文里写坐标常偏（Dock 上方的搜索按钮一次次点在 y=790–890，实际 835），单独问一句「X 在哪」却很准。所以 `tapon <描述>`、`press <键标签>`、`home` 都由程序在当前截图（带网格）上快速定位，文字要求完全匹配（Notes 不是 rednote）。离线验证脚本：`tools/replay_actor.py`。
+- **App 名必须用英文**：中文名在英文语系下搜不到。`apps.py` 按任务给出「中文 = 手机上的名字」（如 小红书 = rednote），长名优先（语音备忘录不是备忘录），「信息」「文件」这类常用词只在「打开」等动词后才算 App。
 - **不盲操作**：AirPlay 断流时 `screen.live` 为假，agent 直接抛 `BlindError` 而不是拿旧帧猜。
 - **屏幕变化检测**会屏蔽指针移动区域和状态栏，避免"指针动了"被误判成"界面变了"。
 - **无进展即升级**：一步做完屏幕没变化时，状态机按 `RETRY → REPLAN → ABORT` 处理——先让 actor 换个动作，再没变化就带着失败上下文重新规划，连续 3 步无变化直接判失败，而不是空转到步数上限。
@@ -100,7 +107,17 @@ uv run --env-file .env python -m hidagent
 
 ## 测试
 
-`server/tests/` 有 64 个测试，当前全部通过（agent 回复解析、恢复与计划进度、device 协议与超时、llm 的 token 参数回退、vision 差分与指针识别、phone 闭环瞄准、状态机升级）。
+`server/tests/` 有 97 个测试，当前全部通过（agent 回复解析、恢复与计划进度、home/tapon/press、device 协议与超时、llm 的 token 参数与快速模式、vision 差分与指针识别、phone 闭环瞄准与双击、状态机升级、App 名映射、回归判定）。
+
+真机回归（会占用手机几分钟到二十几分钟）：
+
+```bash
+cd server
+uv run python tools/regress.py                      # tasks.json 里全部任务各一次
+uv run python tools/regress.py -n 3 calculator      # 指定任务、多次
+```
+
+每个任务先用 agent 自己的 `home` 回主屏再开始；结果连同 git 提交号写入 `~/.hidagent/regress.jsonl`。答对但动作数少于 `min_actions` 的记为 SUSPECT（比如计算器屏幕上还留着上次的答案）。
 
 `server/.venv` 只装了运行时依赖；装上 dev extra 后即可运行：
 
@@ -115,17 +132,16 @@ uv sync --extra dev && uv run pytest -q
 
 - **实机验证极窄**：一台 iPhone、一块板、若干次手动运行；没有连续 N 次成功率，也没有跨设备数据。
 - **硬件层不在本仓库**：ESP32-S3 固件与 XMC flash 补丁在另一个仓库；这里的 `device.py` 只描述协议（`move` / `tap` / `type` / `ping` / 带 `hello <reset reason> <uptime ms>` 的握手）。
-- **AirPlay 静止不推帧**：画面不变时没有新帧，`live` 靠 90 秒宽限判断，长时间静止后的第一步可能拿到旧画面。
+- **定位用的是最新画面**：`tapon` 在模型做决定之后才定位，这几秒里界面若变了（Spotlight 结果晚到），可能找不到或找错；找不到时这一步报错、模型重看。
 - **`aim` 仍是 best-effort**：指针在 Dock 等深色区域或与背景同色时找不到，会退化为不补偿的点击；每次精确点击多花约 1–3 秒。
-- **模型自己的坐标估计会偏**：指针已能落到模型给的位置，但模型有时把图标位置估错（如 Settings 图标 y 给 697，实际约 593）。
+- **每次定位多一次模型调用**（约 1 秒）：`tapon`、`press`、`home` 都依赖快速模式的定位回答，模型换了要重新验证（`tools/replay_actor.py` 与 trace 里的 locate 记录）。
 - **成功判定依赖 actor 自述**：`task_state.py` 已接管"无进展"的检测与升级，但 `done` 仍由模型在回复里声明，没有基于目标的终态校验。
 
 ## 仓库与分支
 
-- 本地 `main` 跟踪 `origin/rebuild`，已快进合并 `rebuild_ds`（`aea4545`，task_state 恢复逻辑），比远端多 1 个提交，尚未推送。
-- `origin/main` 是**另一个仓库**的内容（[esp32s3-xmc-flash-fix](https://github.com/liang-zs/esp32s3-xmc-flash-fix) 的 README 与 patches），和本仓库的 agent 代码无关。
-
-也就是说：**不要在这个工作区直接 `git push origin main`**，否则会把 agent 代码推进 XMC 补丁仓库的 main。要么统一用 `rebuild` 分支，要么给 agent 代码单开一个仓库。
+- 工作分支 `iphone11-progress-aim`，推送到 `origin`（[esp32s3-xmc-flash-fix](https://github.com/liang-zs/esp32s3-xmc-flash-fix)）的同名分支；改动前的版本打了 tag `baseline-95s`。`llm-speed`、`progress-done`、`clear-field`、`aim-grid` 是已合并的实验分支。
+- `origin/main` 是 XMC 补丁仓库自己的内容，和 agent 代码无关：**不要 `git push origin main`**。
+- ESP32-S3 HID 桥固件在私有仓库 `liang-zs/hid-bridge-firmware`（本地 `~/embodied-ai/hid_bridge`）；`link-watchdog` 分支加了 10 秒空闲重连和 Wi-Fi 重连，尚未烧录。
 
 ## 归属与许可
 
