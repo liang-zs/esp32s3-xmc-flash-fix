@@ -1146,7 +1146,7 @@ class Agent:
         if button is None:  # the menu may be open already (it hides the button)
             item = await self._locate(AT_HOME_Q)
             if item is not None:
-                await self.phone.tap(item[0] / 1000, item[1] / 1000, aim=True)
+                await self._tap_until_changed(item)
                 log.info("[HOME] AssistiveTouch menu was open; Home at %s", item)
                 return [item]
             log.warning("[HOME] no AssistiveTouch button on screen; swiping up from the bottom edge")
@@ -1157,9 +1157,21 @@ class Agent:
         item = await self._locate(AT_HOME_Q)
         if item is None:
             raise ValueError("home: the AssistiveTouch menu did not open (no Home item on screen)")
-        await self.phone.tap(item[0] / 1000, item[1] / 1000, aim=True)
+        await self._tap_until_changed(item)
         log.info("[HOME] AssistiveTouch at %s, Home at %s", button, item)
         return [button, item]
+
+    async def _tap_until_changed(self, spot: tuple[int, int], tries: int = 2) -> bool:
+        """Tap, wait for the screen, and tap once more if nothing changed. iPhone 11, 2026-11-18: the first tap
+        on the AssistiveTouch menu's Home (located right) did nothing, probably while the menu still opened."""
+        for _ in range(tries):
+            before = self.screen.frame
+            await self.phone.tap(spot[0] / 1000, spot[1] / 1000, aim=True)
+            await self.screen.settled(quiet=0.3, least=0.6, most=2.0)
+            if vision.changed(before, self.screen.frame, ignore=((spot[0] / 1000, spot[1] / 1000),)):
+                return True
+            log.warning("[HOME] tap at %s changed nothing; tapping again", spot)
+        return False
 
     async def _locate_keys(self, labels: list[str]) -> list[tuple[int, int]]:
         """Positions (0-1000) of keypad keys named by label, one fast question per distinct label, in parallel.

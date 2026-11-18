@@ -274,7 +274,7 @@ def _home_agent(answers):
     from hidagent.debug import Trace
 
     class Screen:
-        live, frame, aspect = True, b"jpeg", 0.46
+        live, frame, aspect = True, None, 0.46  # no frame: every tap counts as a change
         async def settled(self, **kw):
             pass
 
@@ -324,3 +324,14 @@ def test_home_with_the_menu_already_open_taps_its_home_item():
     agent = _home_agent({"button": "none", "home": "570 855"})
     asyncio.run(agent._do({"action": "home"}))
     assert agent.phone.did == [("tap", 570, 855)]
+
+
+def test_home_taps_the_menu_home_again_when_the_first_tap_changed_nothing(monkeypatch):
+    import asyncio
+
+    import hidagent.agent as agent_module
+    agent = _home_agent({"button": "880 770", "home": "570 855"})
+    results = iter([False, True])  # the first Home tap does nothing, the second goes home
+    monkeypatch.setattr(agent_module.vision, "changed", lambda *a, **k: next(results))
+    asyncio.run(agent._do({"action": "home"}))
+    assert agent.phone.did == [("tap", 880, 770), ("tap", 570, 855), ("tap", 570, 855)]
