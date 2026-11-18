@@ -213,7 +213,7 @@ def test_press_locates_each_distinct_key_once_and_taps_in_order():
         async def chat(self, system, text, image=None, max_tokens=600, temperature=0, fast=False):
             label = re.search(r"labeled '(.+?)'", text).group(1)
             self.asked.append(label)
-            return "%d %d" % where[label]
+            return "{} {}".format(*where[label])
 
     class Phone:
         def __init__(self):
@@ -290,6 +290,8 @@ def _home_agent(answers):
             self.did.append(("tap", round(x * 1000), round(y * 1000)))
         async def go_home(self):
             self.did.append(("swipe home",))
+        async def point(self, x, y, aim=False):
+            self.did.append(("move", round(x * 1000), round(y * 1000)))
         async def double_tap(self, x, y, aim=False):
             self.did.append(("double", round(x * 1000), round(y * 1000)))
 
@@ -343,7 +345,8 @@ def test_tapon_locates_the_described_thing_and_taps_it():
     import asyncio
 
     import pytest
-    assert parse_command("tapon Search pill above the Dock") == {"action": "tapon", "what": "Search pill above the Dock"}
+    pill = "Search pill above the Dock"
+    assert parse_command(f"tapon {pill}") == {"action": "tapon", "what": pill}
     agent = _home_agent({"button": "500 835", "home": "none"})  # every non-menu question gets "500 835"
     act = {"action": "tapon", "what": "Search pill above the Dock"}
     asyncio.run(agent._do(act))
@@ -356,7 +359,7 @@ def test_tapon_locates_the_described_thing_and_taps_it():
 def test_home_taps_the_button_again_when_the_menu_does_not_show_up():
     import asyncio
     agent = _home_agent({"button": "880 770", "home": "none"})
-    answers = iter(["880 770", "none", "none", "570 855"])  # button; menu missing twice; after a 2nd tap it is there
+    answers = iter(["880 770", "880 770", "none", "none", "570 855"])  # button (two wordings); menu missing twice
 
     async def chat(system, text, image=None, max_tokens=600, temperature=0, fast=False):
         return next(answers)
@@ -400,3 +403,37 @@ def test_home_by_double_tap_tries_twice_then_fails(monkeypatch):
     with pytest.raises(ValueError, match="changed nothing"):
         asyncio.run(agent._do({"action": "home"}))
     assert agent.phone.did == [("double", 750, 945), ("double", 750, 945)]
+
+
+def test_a_button_answer_next_to_the_mouse_pointer_is_the_pointer():
+    import asyncio
+
+    from hidagent.agent import AT_BUTTON_Q2
+    agent = _home_agent({"button": "none", "home": "none"})
+    agent.at_double_tap_home = True
+    agent._pointer = (0.6, 0.6)
+
+    async def chat(system, text, image=None, max_tokens=600, temperature=0, fast=False):
+        if "Home item" in text:
+            return "none"
+        return "750 950" if AT_BUTTON_Q2[:60] in text else "600 600"  # the old wording answered the pointer
+    agent.actor.chat = chat
+    assert asyncio.run(agent._locate_at_button()) == (750, 950)
+
+    async def pointer_only(system, text, image=None, max_tokens=600, temperature=0, fast=False):
+        x, y = agent._pointer  # always answers wherever the pointer is
+        return "none" if "Home item" in text else f"{round(x * 1000) + 5} {round(y * 1000) - 2}"
+    agent.actor.chat = pointer_only
+    agent._pointer = (0.6, 0.6)
+    assert asyncio.run(agent._locate_at_button()) is None  # it follows the pointer aside: never the button
+
+
+def test_the_button_is_accepted_under_the_pointer_where_home_last_worked():
+    import asyncio
+    agent = _home_agent({"button": "750 945", "home": "none"})
+    agent._pointer = (0.75, 0.945)  # the pointer rests on the button after the last double tap
+    agent._at_button = (750, 945)
+    assert asyncio.run(agent._locate_at_button()) == (750, 945) and agent.phone.did == []
+    agent._at_button = None  # nothing known yet: move the pointer aside and look again
+    assert asyncio.run(agent._locate_at_button()) == (750, 945)
+    assert agent.phone.did == [("move", 40, 500)]

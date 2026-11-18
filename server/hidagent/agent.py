@@ -712,6 +712,13 @@ class BlindError(RuntimeError):
 
 
 FAST_ROUNDS = 3  # rounds on one plan step after which the actor thinks again
+# Two wordings, asked together: each found the button where the other did not. iPhone 11, 2026-11-18: on a black
+# Notes screen with the button at the bottom edge the first answered the mouse pointer (600, 600) four times in a
+# row and home failed the task; the second found (750, 950) there but said none on another frame.
+POINTER_ASIDE = (0.04, 0.5)  # left edge, mid height: nothing to hover there, far from the AssistiveTouch button
+AT_BUTTON_Q2 = ("Where is the center of the AssistiveTouch floating button? It is a dark gray rounded square about one "
+                "sixth of the screen width, with light concentric circles inside, usually at a screen edge. The mouse "
+                "pointer is a plain gray dot about one twentieth of the screen width; it is never the button.")
 AT_BUTTON_Q = ("Where is the center of the AssistiveTouch floating button (a translucent gray rounded square "
                "with a white circle in it, floating over the screen; not the small gray mouse pointer dot)?")
 # names the panel, so the Home app icon on the Home Screen is not taken for the menu item (the old question did)
@@ -742,6 +749,7 @@ class Agent:
         self.grid = grid  # draw a coordinate grid on the actor's screenshots (ACTOR_GRID=1)
         # the phone's AssistiveTouch Double-Tap action is set to Home (AT_DOUBLE_TAP_HOME=1)
         self.at_double_tap_home = at_double_tap_home
+        self._at_button: tuple[int, int] | None = None  # AssistiveTouch button position when home last worked
         self.trace = trace
         self.max_steps, self.max_failures = max_steps, max_failures
         self.max_seconds = max_seconds  # whole-task time limit: a hung step or a slow loop can't run forever
@@ -1180,7 +1188,7 @@ class Agent:
         current frame. iPhone 11, 2026-11-18: going home took the actor 2-4 rounds (button, look, Home, look,
         misses in between); cmd+h does nothing on iPhone. Offline: button found 8/8, menu Home 8/8 (the button
         moves between runs, so it is never a fixed position). No button: the old bottom-edge swipe."""
-        button = await self._locate(AT_BUTTON_Q)
+        button = await self._locate_at_button()
         if button is None:  # the menu may be open already (it hides the button)
             item = await self._locate(AT_HOME_Q)
             if item is not None:
@@ -1207,7 +1215,31 @@ class Agent:
             raise ValueError("home: the AssistiveTouch menu did not open (no Home item on screen)")
         await self._tap_until_changed(item)
         log.info("[HOME] AssistiveTouch at %s, Home at %s", button, item)
+        self._at_button = button
         return [button, item]
+
+    async def _locate_at_button(self) -> tuple[int, int] | None:
+        """The AssistiveTouch button: both wordings in parallel; an answer next to the mouse pointer may be the
+        pointer itself, unless home last worked there (the pointer rests on the button after a double tap). Then
+        the pointer is moved aside (no click) and the button looked for once more."""
+        for attempt in range(2):
+            found = await asyncio.gather(self._locate(AT_BUTTON_Q2), self._locate(AT_BUTTON_Q))
+            px, py = (self._pointer[0] * 1000, self._pointer[1] * 1000) if self._pointer else (-1000, -1000)
+            last = self._at_button
+            near_pointer = False
+            for spot in found:
+                if spot is None:
+                    continue
+                if math.dist(spot, (px, py)) > 60 or (last and math.dist(spot, last) <= 60):
+                    return spot
+                near_pointer = True
+            log.warning("[HOME] AssistiveTouch button not found (answers %s, pointer near %d %d)", found, px, py)
+            if not near_pointer or attempt:
+                return None
+            await self.phone.point(*POINTER_ASIDE)  # tell the pointer and the button apart
+            self._pointer = POINTER_ASIDE
+            await self.screen.settled(quiet=0.2, least=0.4, most=1.0)
+        return None
 
     async def _home_by_double_tap(self, button: tuple[int, int]) -> list[tuple[int, int]]:
         """The phone's AssistiveTouch Double-Tap action is Home: double-tap the button in place (one located spot,
@@ -1221,9 +1253,11 @@ class Agent:
             if item is not None:  # counted as a single tap: the menu opened
                 log.warning("[HOME] double tap opened the menu; tapping its Home at %s", item)
                 await self._tap_until_changed(item)
+                self._at_button = button
                 return [button, item]
             if vision.changed(before, self.screen.frame, ignore=(spot,)):
                 log.info("[HOME] double tap on AssistiveTouch at %s", button)
+                self._at_button = button
                 return [button]
             log.warning("[HOME] double tap %d at %s changed nothing", attempt + 1, button)
         raise ValueError("home: double-tapping AssistiveTouch changed nothing")
