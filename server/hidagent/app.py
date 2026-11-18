@@ -29,7 +29,8 @@ agent = Agent(phone, screen, LLM.from_env("ACTOR"), LLM.from_env("PLANNER"),
               Trace(DATA_DIR / "traces" if DEBUG else None),
               runs_file=DATA_DIR / "runs.jsonl",
               price=lambda when: price_at(when, os.environ.get("LLM_PRICE", ""), os.environ.get("LLM_PRICE_IDLE", ""),
-                                          os.environ.get("LLM_PEAK_HOURS", "9-12,14-18")))
+                                          os.environ.get("LLM_PEAK_HOURS", "9-12,14-18")),
+              grid=os.environ.get("ACTOR_GRID") == "1")
 
 
 @asynccontextmanager

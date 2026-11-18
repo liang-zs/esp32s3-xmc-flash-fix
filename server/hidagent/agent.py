@@ -556,6 +556,13 @@ keyboard, types the letters, picks the first candidate and switches back.
 Then check the field: if a wrong word was picked, clear it and try a shorter phrase.
 Search terms that are English words or app names still use "type".
 
+APP NOTES:
+- Calculator: tapping + - x or / does not change the number shown;
+  the key only turns lighter. Tap an operator once, then go on with
+  the next number; never tap it again because the display looks
+  the same. A wrong digit: tap C once and enter that number again.
+  The app ignores the keyboard ("type" does nothing there).
+
 NOTE:
 Although "home" is recognized by the software,
 avoid using it on this specific device because its
@@ -678,13 +685,16 @@ class BlindError(RuntimeError):
 
 
 FAST_ROUNDS = 3  # rounds on one plan step after which the actor thinks again
+GRID_NOTE = ("\n\nThe screenshot has thin cyan grid lines every 100 units of the 0-1000 scale, labeled in "
+             "yellow along the top and left edges. Read tap positions off them. They are not part of the screen.")
 
 
 class Agent:
     def __init__(self, phone: Phone, screen: Screen, actor: LLM, planner: LLM, trace: Trace,
                  max_steps: int = 40, max_failures: int = 3, max_seconds: float = 300,
-                 runs_file: Path | None = None, price: str | Callable[[float], str] = ""):
+                 runs_file: Path | None = None, price: str | Callable[[float], str] = "", grid: bool = False):
         self.phone, self.screen, self.actor, self.planner = phone, screen, actor, planner
+        self.grid = grid  # draw a coordinate grid on the actor's screenshots (ACTOR_GRID=1)
         self.trace = trace
         self.max_steps, self.max_failures = max_steps, max_failures
         self.max_seconds = max_seconds  # whole-task time limit: a hung step or a slow loop can't run forever
@@ -763,8 +773,11 @@ class Agent:
         )
         fast = fast and bool(getattr(llm, "fast_extra", None))  # only when FAST_BODY is configured
         frame, started = self.screen.frame, time.time()
-        reply = await (llm.chat(system, prompt, frame, temperature=temperature, fast=True) if fast
-                       else llm.chat(system, prompt, frame, temperature=temperature))
+        image = frame
+        if self.grid and role == "actor" and frame:  # the trace keeps the clean frame
+            image, system = vision.grid(frame), system + GRID_NOTE
+        reply = await (llm.chat(system, prompt, image, temperature=temperature, fast=True) if fast
+                       else llm.chat(system, prompt, image, temperature=temperature))
         seconds = round(time.time() - started, 2)
         used = getattr(llm, "last_usage", {}) or {}
         self.usage["calls"] = self.usage.get("calls", 0) + 1

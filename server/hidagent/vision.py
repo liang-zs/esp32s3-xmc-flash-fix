@@ -3,10 +3,29 @@
 import io
 import logging
 
-from PIL import Image, ImageChops, ImageFilter
+from PIL import Image, ImageChops, ImageDraw, ImageFilter
 
 
 log = logging.getLogger(__name__)
+
+
+def grid(jpeg: bytes, step: int = 100) -> bytes:
+    """The frame with thin cyan lines every `step` units of the 0-1000 scale, labeled in yellow, for the model
+    to read positions off. Measured on iPhone 11 screens (calculator keypad, Home Screen icons): with thinking on,
+    key hits went from 6/16 to 15/16 and icons from 14/16 to 16/16; fast replies got tighter (median error
+    25 -> 16 units)."""
+    im = Image.open(io.BytesIO(jpeg)).convert("RGB")
+    draw, (w, h) = ImageDraw.Draw(im), im.size
+    for v in range(step, 1000, step):
+        x, y = v * w / 1000, v * h / 1000
+        draw.line([(x, 0), (x, h)], fill=(0, 255, 255), width=1)
+        draw.line([(0, y), (w, y)], fill=(0, 255, 255), width=1)
+        draw.text((x + 2, 2), str(v), fill=(255, 255, 0))
+        draw.text((2, y + 2), str(v), fill=(255, 255, 0))
+    out = io.BytesIO()
+    im.save(out, "JPEG", quality=85)
+    return out.getvalue()
+
 
 def _gray(jpeg: bytes) -> Image.Image:
     return Image.open(io.BytesIO(jpeg)).convert("L")

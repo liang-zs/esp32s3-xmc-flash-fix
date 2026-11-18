@@ -153,3 +153,34 @@ def test_think_reason_order():
 
 def test_clear_action_parses():
     assert parse_command("clear") == {"action": "clear"}
+
+
+def test_grid_goes_to_the_actor_only_and_the_trace_keeps_the_clean_frame():
+    import asyncio
+    import io
+
+    from PIL import Image
+
+    from hidagent.agent import Agent
+    from hidagent.debug import Trace
+    buf = io.BytesIO()
+    Image.new("RGB", (100, 200)).save(buf, "JPEG")
+    clean = buf.getvalue()
+
+    class Screen:
+        live, frame, aspect = True, clean, 0.46
+
+    class LLM:
+        model = "fake"
+        def __init__(self):
+            self.seen = []
+        async def chat(self, system, text, image=None, max_tokens=600, temperature=0):
+            self.seen.append((system, image))
+            return "DONE: no\nTHINK: ok\nDO: tap 1 2"
+
+    actor, planner = LLM(), LLM()
+    agent = Agent(phone=None, screen=Screen(), actor=actor, planner=planner, trace=Trace(None), grid=True)
+    _, _, frame = asyncio.run(agent._ask("actor", actor, "SYS", "go"))
+    asyncio.run(agent._ask("planner", planner, "SYS", "go"))
+    assert frame == clean and actor.seen[0][1] != clean and "grid lines" in actor.seen[0][0]
+    assert planner.seen[0] == ("SYS", clean)

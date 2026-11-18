@@ -145,3 +145,17 @@ def test_stream_noise_is_not_a_screen_change():
     assert not _differs(base, _thumb(jpeg(speck=True)))
     assert _differs(base, _thumb(jpeg(dot=(200, 400))))
     assert _differs(None, base)
+
+
+def test_grid_draws_lines_and_keeps_the_size():
+    import io
+
+    from PIL import Image
+
+    from hidagent.vision import grid
+    buf = io.BytesIO()
+    Image.new("RGB", (500, 1080), (0, 0, 0)).save(buf, "JPEG")
+    out = Image.open(io.BytesIO(grid(buf.getvalue()))).convert("RGB")
+    assert out.size == (500, 1080)
+    r, g, b = out.getpixel((250, 540))  # x=500 / y=500 lines cross at the center
+    assert g > 150 and b > 150 and r < 120
