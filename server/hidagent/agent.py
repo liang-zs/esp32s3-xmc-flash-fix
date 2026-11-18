@@ -1124,6 +1124,16 @@ class Agent:
             return [{**a, "_shot": frame} for a in acts]  # every action is drawn on the same screenshot
         raise ValueError(f"actor gave no valid action: {reply[:200]}")
 
+    async def _press_key(self, label: str, x: int, y: int) -> bool:
+        """Tap one keypad key; True when the screen changed (a digit shows up on the display)."""
+        before, started = self.screen.frame, time.time()
+        await self.phone.tap(x / 1000, y / 1000, aim=True)
+        await self.screen.settled(quiet=0.15, least=0.3, most=1.0)
+        hit = vision.changed(before, self.screen.frame)
+        log.info("[PRESS] %s at (%d, %d): %s in %.2f s", label, x, y, "screen changed" if hit else "NO CHANGE",
+                 time.time() - started)
+        return hit
+
     async def _locate_keys(self, labels: list[str]) -> list[tuple[int, int]]:
         """Positions (0-1000) of keypad keys named by label, one fast question per distinct label, in parallel.
         iPhone 11 Calculator, 2026-11-18: asked one key at a time the actor found 16/16 keys, but writing a
@@ -1171,8 +1181,17 @@ class Agent:
             case "clear": await self.phone.clear_field()
             case "press":
                 a["taps"] = await self._locate_keys(a["keys"].split())
-                for x, y in a["taps"]:
-                    await self.phone.tap(x / 1000, y / 1000, aim=True)
+                a["registered"], a["retapped"] = [], []
+                for label, (x, y) in zip(a["keys"].split(), a["taps"], strict=True):
+                    hit = await self._press_key(label, x, y)
+                    # iPhone 11, 2026-11-18: the first key of a sequence was lost 3 times in one run (128 came
+                    # out as 28; not reproduced in 10 later sequences). A digit always changes the display, so one
+                    # more tap is safe; operators and C/AC are never repeated (twice can change the meaning).
+                    if not hit and re.fullmatch(r"[0-9.]", label):
+                        log.warning("[PRESS] %s did not register; tapping it again", label)
+                        a["retapped"].append(label)
+                        hit = await self._press_key(label, x, y)
+                    a["registered"].append(hit)
             case "key": await self.phone.key(a["combo"])
             case "home": await self.phone.go_home()
             case "back": await self.phone.go_back()

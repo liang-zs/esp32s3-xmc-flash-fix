@@ -202,7 +202,9 @@ def test_press_locates_each_distinct_key_once_and_taps_in_order():
     where = {"1": (140, 756), "2": (380, 756), "8": (380, 537), "×": (854, 537), "=": (854, 866)}
 
     class Screen:
-        live, frame, aspect = True, b"jpeg", 0.46
+        live, frame, aspect = True, None, 0.46  # no frame: vision.changed counts every tap as a change
+        async def settled(self, **kw):
+            pass
 
     class Actor:
         model, fast_extra, last_usage = "fake", {"thinking": {"type": "disabled"}}, {}
@@ -225,3 +227,42 @@ def test_press_locates_each_distinct_key_once_and_taps_in_order():
     asyncio.run(agent._do(act))
     assert sorted(actor.asked) == sorted(set("1 2 8 × =".split()))  # "2" asked once
     assert phone.taps == [where[k] for k in "1 2 8 × 2 =".split()] == act["taps"]
+    assert act["registered"] == [True] * 6
+
+
+def test_press_taps_a_digit_again_when_the_screen_did_not_change_but_never_an_operator():
+    import asyncio
+
+    from hidagent.agent import Agent
+    from hidagent.debug import Trace
+
+    class Screen:
+        live, frame, aspect = True, b"jpeg", 0.46
+        async def settled(self, **kw):
+            pass
+
+    class Phone:
+        def __init__(self):
+            self.taps = []
+        async def tap(self, x, y, aim=False):
+            self.taps.append(round(x * 1000))
+
+    lost = {"first 1", "first x"}  # the first tap on 1 and on x change nothing
+    seen = []
+
+    async def press_key(label, x, y):
+        await agent.phone.tap(x / 1000, y / 1000, aim=True)
+        key = ("first " if label not in seen else "again ") + label
+        seen.append(label)
+        return key not in lost
+
+    agent = Agent(phone=Phone(), screen=Screen(), actor=None, planner=None, trace=Trace(None))
+    agent._press_key = press_key
+
+    async def locate(labels):
+        return [({"1": 100, "2": 200, "x": 300}[k], 500) for k in labels]
+    agent._locate_keys = locate
+    act = {"action": "press", "keys": "1 2 x"}
+    asyncio.run(agent._do(act))
+    assert agent.phone.taps == [100, 100, 200, 300]  # 1 tapped twice, x once
+    assert act["retapped"] == ["1"] and act["registered"] == [True, True, False]

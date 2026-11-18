@@ -60,6 +60,7 @@ app.mount("/static", Static(directory=Path(__file__).parent / "static"), name="s
 class Point(BaseModel):
     x: float
     y: float
+    aim: bool = False  # tap: find the pointer on screen and correct before clicking, like the agent does
 
 
 class Swipe(BaseModel):
@@ -144,7 +145,7 @@ def step_shot(index: int):
 
 @app.post("/api/tap")
 async def tap(p: Point):
-    return await act(phone.tap(p.x, p.y))
+    return await act(phone.tap(p.x, p.y, aim=p.aim))
 
 
 @app.post("/api/swipe")
