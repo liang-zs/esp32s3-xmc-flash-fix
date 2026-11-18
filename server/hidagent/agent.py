@@ -745,7 +745,7 @@ class Agent:
             )
 
     async def _ask(self, role: str, llm: LLM, system: str, prompt: str,
-                   temperature: float = 0, fast: bool = False) -> tuple[str, float, bytes | None]:
+                   temperature: float = 0, fast: bool = False, why: str = "") -> tuple[str, float, bytes | None]:
         if not self.screen.live:  # never let the model act blind
             raise BlindError("lost the phone screen: reconnect Screen Mirroring")
         self.task_ctx.transition(
@@ -766,10 +766,13 @@ class Agent:
         self.usage["calls"] = self.usage.get("calls", 0) + 1
         self.usage["llm_s"] = round(self.usage.get("llm_s", 0) + seconds, 2)
         self.usage["fast_calls"] = self.usage.get("fast_calls", 0) + fast
+        if why and not fast:  # where the slow calls come from: think_missed, think_stuck, ... (count and seconds)
+            self.usage[f"think_{why}"] = self.usage.get(f"think_{why}", 0) + 1
+            self.usage[f"think_{why}_s"] = round(self.usage.get(f"think_{why}_s", 0) + seconds, 2)
         for k, v in used.items():
             self.usage[k] = self.usage.get(k, 0) + v
         self.trace.write(frame, kind="llm", role=role, model=llm.model, prompt=prompt,
-                         reply=reply, seconds=seconds, fast=fast)
+                         reply=reply, seconds=seconds, fast=fast, why=why)
         return reply, seconds, frame
 
     async def _run(self) -> None:
@@ -1017,6 +1020,21 @@ class Agent:
         self._record(frame, action="replan (stuck)" if stuck else "plan", plan=self.plan, plan_zh=plan_zh,
                      think_s=seconds)
 
+    def _think_reason(self, retry: str = "") -> str:
+        """Why the actor should think this round instead of answering fast; "" = answer fast.
+
+        rejected / repeated: its last reply this round was unparseable, or the move that just did nothing.
+        missed: the previous action changed nothing on screen (a tap may have landed off target).
+        stuck: FAST_ROUNDS rounds on one plan step (fast replies tend to keep the old STEP number after the
+        screen moved on, which the stall budget reads as being stuck)."""
+        if retry:
+            return retry
+        if self._missed():
+            return "missed"
+        if self.task_ctx.rounds_on_step >= FAST_ROUNDS:
+            return "stuck"
+        return ""
+
     async def _next_actions(self) -> list[dict]:
         # actions and their effect only: echoing earlier thoughts makes the model repeat them instead of looking
         hidden = ("t", "plan", "plan_zh", "think_s", "act_s", "shot", "thought", "thought_zh", "changed",
@@ -1027,23 +1045,25 @@ class Agent:
                             for s in self.steps[-8:] if "plan" not in s) or "(none)"
         prompt = (f"Goal: {self.task}\n\n{self._progress()}\n\nRecent actions:\n{history}\n\n"
                   "Next action? Start with STEP: <the plan step you are working on>.")
+        retry = ""  # why the previous reply in this round was refused
         for attempt in range(3):  # retry unparseable replies, a little less deterministically
-            # routine step: answer fast; think it through when the last move did nothing, a reply was rejected,
-            # or the plan step has not advanced for a while (fast replies tend to keep repeating the old STEP
-            # number after the screen moved on, which the stall budget would read as being stuck)
-            fast = attempt == 0 and not self._missed() and self.task_ctx.rounds_on_step < FAST_ROUNDS
-            reply, seconds, frame = await self._ask("actor", self.actor, ACTOR_PROMPT, prompt, 0.4 * attempt, fast)
+            # routine step: answer fast; think it through when there is a reason to look harder
+            why = self._think_reason(retry)
+            reply, seconds, frame = await self._ask("actor", self.actor, ACTOR_PROMPT, prompt, 0.4 * attempt,
+                                                    fast=not why, why=why)
             try:
                 acts = parse_actions(reply)
             except ValueError as e:
                 log.warning("unparseable actor reply (%s): %s", e, reply[:200])
                 if reply.strip():  # tell the model what was wrong instead of asking the same thing again
                     prompt += f"\n\nYour last reply was rejected: {e}"
+                retry = "rejected"
                 continue
             if self._missed() and _key(acts[0]) == _key(self.steps[-1]):  # same move that just did nothing
                 log.info("actor repeated an action that changed nothing; asking for another")
                 prompt += (f"\n\nYou just proposed {json.dumps(_key(acts[0]))} again, but it changed nothing last "
                            "time. Choose a different action (another position, a shorter swipe, or another way).")
+                retry = "repeated"
                 continue
             acts[0]["think_s"] = seconds
             return [{**a, "_shot": frame} for a in acts]  # every action is drawn on the same screenshot

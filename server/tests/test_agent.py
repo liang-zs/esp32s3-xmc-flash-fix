@@ -134,3 +134,18 @@ def test_actor_answers_fast_on_routine_steps_and_thinks_after_a_miss():
     agent.task_ctx.rounds_on_step = 3  # the screen changes, but the plan step does not advance
     asyncio.run(agent._next_actions())
     assert actor.fast == [True, False, False] and agent.usage["fast_calls"] == 1
+    assert agent.usage["think_missed"] == 1 and agent.usage["think_stuck"] == 1
+    assert "think_rejected" not in agent.usage
+
+
+def test_think_reason_order():
+    from hidagent.agent import Agent
+    from hidagent.debug import Trace
+
+    agent = Agent(phone=None, screen=None, actor=None, planner=None, trace=Trace(None))
+    assert agent._think_reason() == ""
+    agent.task_ctx.rounds_on_step = 3
+    assert agent._think_reason() == "stuck"
+    agent.steps = [{"action": "tap", "x": 1, "y": 1, "changed": False}]
+    assert agent._think_reason() == "missed"
+    assert agent._think_reason("rejected") == "rejected"

@@ -126,3 +126,11 @@ def test_each_run_leaves_a_summary_line(tmp_path, monkeypatch):
     row = json.loads((tmp_path / "runs.jsonl").read_text())
     assert row["result"] == "done" and row["task"] == "打开 Settings" and row["calls"] == 2
     assert row["prompt"] == 20 and row["completion"] == 10 and row["cost"] == round((20 * 2 + 10 * 3) / 1e6, 6)
+
+
+def test_runs_api_sums_think_reasons():
+    from hidagent.app import _think_totals
+
+    rows = [{"think_missed": 2, "think_missed_s": 6.5, "fast_calls": 9},
+            {"think_missed": 1, "think_missed_s": 3.0, "think_stuck": 4, "think_stuck_s": 12.25}]
+    assert _think_totals(rows) == {"missed": 3, "missed_s": 9.5, "stuck": 4, "stuck_s": 12.25}

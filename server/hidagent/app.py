@@ -113,7 +113,18 @@ def runs(last: int = 50):
             "avg_seconds_ok": round(sum(r["seconds"] for r in ok) / len(ok), 1) if ok else None,
             "avg_tokens": round(sum(r.get("prompt", 0) + r.get("completion", 0) for r in rows) / len(rows))
             if rows else None,
-            "total_cost": round(sum(costs), 4) if costs else None}
+            "total_cost": round(sum(costs), 4) if costs else None,
+            "think": _think_totals(rows)}
+
+
+def _think_totals(rows: list[dict]) -> dict:
+    """Actor calls that thought instead of answering fast, by reason, over these runs: count and seconds."""
+    out: dict = {}
+    for r in rows:
+        for k, v in r.items():
+            if k.startswith("think_") and isinstance(v, (int, float)):
+                out[k[6:]] = round(out.get(k[6:], 0) + v, 2)
+    return out
 
 
 @app.get("/api/frame.jpg")
