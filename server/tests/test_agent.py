@@ -316,7 +316,7 @@ def test_home_fails_when_the_menu_does_not_open():
     agent = _home_agent({"button": "880 770", "home": "none"})
     with pytest.raises(ValueError, match="menu did not open"):
         asyncio.run(agent._do({"action": "home"}))
-    assert agent.phone.did == [("tap", 880, 770)]
+    assert agent.phone.did == [("tap", 880, 770), ("tap", 880, 770)]  # tried the button twice
 
 
 def test_home_with_the_menu_already_open_taps_its_home_item():
@@ -349,3 +349,15 @@ def test_tapon_locates_the_described_thing_and_taps_it():
     agent = _home_agent({"button": "none", "home": "none"})
     with pytest.raises(ValueError, match="could not find"):
         asyncio.run(agent._do({"action": "tapon", "what": "Purple unicorn button"}))
+
+
+def test_home_taps_the_button_again_when_the_menu_does_not_show_up():
+    import asyncio
+    agent = _home_agent({"button": "880 770", "home": "none"})
+    answers = iter(["880 770", "none", "none", "570 855"])  # button; menu missing twice; after a 2nd tap it is there
+
+    async def chat(system, text, image=None, max_tokens=600, temperature=0, fast=False):
+        return next(answers)
+    agent.actor.chat = chat
+    asyncio.run(agent._do({"action": "home"}))
+    assert agent.phone.did == [("tap", 880, 770), ("tap", 880, 770), ("tap", 570, 855)]

@@ -75,7 +75,7 @@ Example:
 DONE: no
 THINK: Spotlight is open, but the search field may not have focus.
 I will tap the search field before typing.
-DO: tapon search field at the top of Spotlight
+DO: tapon Spotlight search field
 
 PLAN PROGRESS:
 - The plan you receive marks each step [done], [now] or [todo].
@@ -576,7 +576,7 @@ DO: tapon Search pill above the Dock
 
 THINK: Spotlight is open. I should explicitly focus
 the search field before entering the app name.
-DO: tapon search field at the top of Spotlight
+DO: tapon Spotlight search field
 
 THINK: The search field is focused and empty.
 The user requested 备忘录, which is Notes in English.
@@ -1168,9 +1168,17 @@ class Agent:
             log.warning("[HOME] no AssistiveTouch button on screen; swiping up from the bottom edge")
             await self.phone.go_home()
             return [(500, 995), (500, 600)]
-        await self.phone.tap(button[0] / 1000, button[1] / 1000, aim=True)
-        await self.screen.settled(quiet=0.2, least=0.5, most=1.5)
-        item = await self._locate(AT_HOME_Q)
+        item = None
+        for attempt in range(2):  # iPhone 11, 2026-11-18: the menu did not show up after the first tap twice
+            await self.phone.tap(button[0] / 1000, button[1] / 1000, aim=True)
+            for wait in (0.5, 1.0):  # it may still be opening
+                await self.screen.settled(quiet=0.2, least=wait, most=1.5)
+                item = await self._locate(AT_HOME_Q)
+                if item is not None:
+                    break
+            if item is not None:
+                break
+            log.warning("[HOME] AssistiveTouch menu did not open after tap %d at %s", attempt + 1, button)
         if item is None:
             raise ValueError("home: the AssistiveTouch menu did not open (no Home item on screen)")
         await self._tap_until_changed(item)
