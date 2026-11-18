@@ -26,9 +26,14 @@ def test_step_line_is_parsed_and_not_part_of_the_action():
     assert parse_actions("THINK: x\nDO: wait")[0].get("step") is None
 
 
+def go_to(a: Agent, step: int) -> None:
+    for _ in range(step - 1):  # the plan moves one step per round
+        a._advance(None, done=True)
+
+
 def test_progress_only_moves_forward():
     a = agent()
-    a._advance(5)
+    go_to(a, 5)
     assert a.completed == plan_steps(PLAN)[:4] and a.plan_step == 5
     a._advance(1)  # Home Screen looks like the start again: no going back
     assert a.plan_step == 5 and len(a.completed) == 4
@@ -38,7 +43,7 @@ def test_progress_only_moves_forward():
 
 def test_progress_marks_and_completed_list_reach_the_actor():
     a = agent()
-    a._advance(3)
+    go_to(a, 3)
     text = a._progress()
     assert "1. [done] Tap Settings." in text and "3. [now] Tap About." in text and "5. [todo] Open Notes." in text
     assert "NEVER redo" in text
@@ -59,8 +64,40 @@ def test_completed_steps_survive_a_replan():
     planner = Planner()
     a = Agent(phone=None, screen=Screen(), actor=planner, planner=planner, trace=Trace(None))
     a.plan = PLAN
-    a._advance(5)
+    go_to(a, 5)
     asyncio.run(a._replan(stuck=True))
     assert "- Tap About." in planner.prompts[0] and "do NOT plan these again" in planner.prompts[0]
     assert a.plan_step == 1 and len(a.completed) == 4
     assert "- Return to the Home Screen." in a._progress()
+
+
+def test_done_line_is_parsed():
+    assert parse_actions("DONE: yes\nTHINK: Settings is open\nDO: tap 1 2")[0]["done"] is True
+    assert parse_actions("DONE: No\nTHINK: x\nDO: wait")[0]["done"] is False
+    assert "done" not in parse_actions("THINK: x\nDO: wait")[0]
+
+
+def test_done_moves_one_step_and_no_keeps_it():
+    a = agent()
+    a._advance(None, done=False)
+    assert a.plan_step == 1 and a.completed == []
+    a._advance(None, done=True)
+    assert a.plan_step == 2 and a.completed == ["Tap Settings."]
+    a._advance(4, done=False)  # the yes/no wins over a step number in the same reply
+    assert a.plan_step == 2
+
+
+def test_a_claimed_jump_moves_only_one_step():
+    # iPhone 11, 2026-11-17: the actor claimed step 4 while still on step 1 and skipped two steps
+    a = agent()
+    a._advance(4)
+    assert a.plan_step == 2 and a.completed == ["Tap Settings."]
+
+
+def test_last_step_done_marks_everything_done():
+    a = agent()
+    go_to(a, 5)
+    a._advance(None, done=True)
+    a._advance(None, done=True)  # nothing past the end
+    assert a.plan_step == 6 and len(a.completed) == 5
+    assert "[now]" not in a._progress()
