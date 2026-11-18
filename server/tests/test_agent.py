@@ -335,3 +335,17 @@ def test_home_taps_the_menu_home_again_when_the_first_tap_changed_nothing(monkey
     monkeypatch.setattr(agent_module.vision, "changed", lambda *a, **k: next(results))
     asyncio.run(agent._do({"action": "home"}))
     assert agent.phone.did == [("tap", 880, 770), ("tap", 570, 855), ("tap", 570, 855)]
+
+
+def test_tapon_locates_the_described_thing_and_taps_it():
+    import asyncio
+
+    import pytest
+    assert parse_command("tapon Search pill above the Dock") == {"action": "tapon", "what": "Search pill above the Dock"}
+    agent = _home_agent({"button": "500 835", "home": "none"})  # every non-menu question gets "500 835"
+    act = {"action": "tapon", "what": "Search pill above the Dock"}
+    asyncio.run(agent._do(act))
+    assert agent.phone.did == [("tap", 500, 835)] and act["taps"] == [(500, 835)]
+    agent = _home_agent({"button": "none", "home": "none"})
+    with pytest.raises(ValueError, match="could not find"):
+        asyncio.run(agent._do({"action": "tapon", "what": "Purple unicorn button"}))

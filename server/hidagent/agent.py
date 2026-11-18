@@ -74,8 +74,8 @@ Example:
 
 DONE: no
 THINK: Spotlight is open, but the search field may not have focus.
-I will tap the center of the search field before typing.
-DO: tap 480 120 precise
+I will tap the search field before typing.
+DO: tapon search field at the top of Spotlight
 
 PLAN PROGRESS:
 - The plan you receive marks each step [done], [now] or [todo].
@@ -126,9 +126,9 @@ Always aim at the CENTER of a visible interactive element.
 Never guess the location of an invisible button.
 
 For small controls, search results, app icons, and list rows,
-use precise targeting:
+name them and let the system find them:
 
-DO: tap X Y precise
+DO: tapon General row
 
 ==================================================
 3. DEVICE-SPECIFIC NAVIGATION
@@ -295,12 +295,11 @@ Distinguish application icons and app result rows from:
 - Other unrelated search matches
 
 STEP L:
-Tap the center of the actual app result
-using precise targeting.
+Tap the actual app result.
 
 Example:
 
-DO: tap 280 350 precise
+DO: tapon Notes app icon under Top Hit
 
 STEP M:
 Wait for a new screenshot and verify the requested
@@ -344,7 +343,8 @@ The device uses relative USB mouse movements.
 
 Mouse positioning can drift slightly.
 
-For important taps, use:
+For important taps on named things, use tapon (it is located
+on the screenshot); for unnamed points, use:
 
 DO: tap X Y precise
 
@@ -530,6 +530,7 @@ pinyin LETTERS
 clear        (empties the focused text field; use it instead of
               cmd+a or the field's x button)
 press KEYS   (keypad keys by label, e.g. press 1 2 8 x 3 7 =; see KEYPADS)
+tapon WHAT   (tap a named thing, located for you; see TAPON)
 key COMBO
 home
 back
@@ -571,23 +572,38 @@ DO: home
 
 THINK: The Home Screen is visible and there is
 a Search button above the Dock.
-DO: tap 500 890 precise
+DO: tapon Search pill above the Dock
 
 THINK: Spotlight is open. I should explicitly focus
 the search field before entering the app name.
-DO: tap 450 120 precise
+DO: tapon search field at the top of Spotlight
 
 THINK: The search field is focused and empty.
 The user requested 备忘录, which is Notes in English.
 DO: type Notes
 
 THINK: The Notes app result is now visible.
-I will tap the center of its icon.
-DO: tap 250 320 precise
+I will tap its icon.
+DO: tapon Notes app icon under Top Hit
 
 THINK: The Notes app is open, so the requested
 task has been completed.
 DO: done Opened the Notes app successfully.
+
+TAPON:
+To tap something you can name (a button, list row, app icon, search
+result, tab, pill), describe it instead of giving coordinates:
+DO: tapon General row
+DO: tapon Search pill above the Dock
+DO: tapon Notes app icon under Top Hit
+The system finds it on this screenshot and taps its center. Write a
+short description that matches only that one thing: its visible text
+plus what kind of element it is, and where when the text appears more
+than once. Never write "tap X Y" for something you can name: your own
+coordinates miss small targets far more often (the Search pill above
+the Dock was missed again and again at y 790-890; tapon finds it).
+Use "tap X Y" only for things with no name (an empty spot, a point on
+a canvas, a picker wheel).
 
 KEYPADS:
 To enter a number or expression on a keypad that stays in place
@@ -614,8 +630,8 @@ META = ("t", "thought", "thought_zh", "think_s", "act_s", "shot", "_shot", "chan
 # action name -> argument names; numeric arguments are 0-1000 screen coordinates
 ACTIONS = {"tap": ("x", "y"), "swipe": ("x1", "y1", "x2", "y2"), "circle": ("x", "y", "r"), "path": ("points",),
            "type": ("text",), "pinyin": ("text",), "key": ("combo",), "done": ("answer",), "fail": ("reason",),
-           "home": (), "back": (), "wait": (), "replan": (), "clear": (), "press": ("keys",)}
-TEXT_ARGS = ("text", "combo", "answer", "reason", "keys")
+           "home": (), "back": (), "wait": (), "replan": (), "clear": (), "press": ("keys",), "tapon": ("what",)}
+TEXT_ARGS = ("text", "combo", "answer", "reason", "keys", "what")
 
 
 def parse_command(line: str) -> dict:
@@ -1215,6 +1231,12 @@ class Agent:
                     a["registered"].append(hit)
             case "key": await self.phone.key(a["combo"])
             case "home": a["taps"] = await self._home()
+            case "tapon":
+                spot = await self._locate(f"Where is the center of the {a['what']}?")
+                if spot is None:
+                    raise ValueError(f"tapon: could not find {a['what']!r} on screen")
+                a["taps"] = [spot]
+                await self.phone.tap(spot[0] / 1000, spot[1] / 1000, aim=True)
             case "back": await self.phone.go_back()
             case "wait": pass
             case other: raise ValueError(f"unknown action {other!r}")
@@ -1230,7 +1252,7 @@ def _pointer_path(act: dict) -> list[tuple[float, float]]:
         case "circle": return [f(act["x"] + act["r"], act["y"])]
         case "home": return [f(x, y) for x, y in act.get("taps", [(500, 995), (500, 600)])]
         case "back": return [(0.005, 0.45), (0.6, 0.45)]
-        case "press": return [f(x, y) for x, y in act.get("taps", [])]
+        case "press" | "tapon": return [f(x, y) for x, y in act.get("taps", [])]
         case _: return []
 
 
