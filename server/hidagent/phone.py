@@ -24,6 +24,7 @@ REHOME_EVERY = 10       # gestures between re-homing
 HOLD = 0.25             # seconds to rest before lifting, so iOS adds no momentum (the swipe stops where it ends)
 IME_SWITCH = 0.4        # seconds for iOS to switch keyboards / show pinyin candidates
 TAP_GAP = 0.15          # seconds to stay still after a click, so iOS sees a finished tap, not the start of a drag
+DOUBLE_GAP = 0.08       # seconds between the two clicks of a double tap (iOS default double-tap timeout ~0.3 s)
 NUDGE = 12              # mouse units the pointer is wiggled by to find it on screen
 AIM_TOLERANCE = 0.008   # screen fraction; a bigger miss is corrected before pressing
 AIM_ROUNDS = 3          # find-and-correct rounds before pressing anyway (each correction is a move that can miss too)
@@ -215,6 +216,14 @@ class Phone:
     async def tap(self, x: float, y: float, aim: bool = False) -> None:
         """aim=True finds the pointer on screen first (slower); worth it when a tap just missed."""
         await self.point(x, y, aim)
+        await self.device.send("click")
+        await asyncio.sleep(TAP_GAP)
+
+    async def double_tap(self, x: float, y: float, aim: bool = False) -> None:
+        """Two clicks on one spot, close enough for iOS to count a double tap: aim once, never move between."""
+        await self.point(x, y, aim)
+        await self.device.send("click")
+        await asyncio.sleep(DOUBLE_GAP)
         await self.device.send("click")
         await asyncio.sleep(TAP_GAP)
 

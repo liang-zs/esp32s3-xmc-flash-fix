@@ -281,7 +281,7 @@ def _home_agent(answers):
     class Actor:
         model, fast_extra, last_usage = "fake", {"thinking": {"type": "disabled"}}, {}
         async def chat(self, system, text, image=None, max_tokens=600, temperature=0, fast=False):
-            return answers["home" if "menu is open" in text else "button"]
+            return answers["home" if "Home item" in text else "button"]
 
     class Phone:
         def __init__(self):
@@ -290,6 +290,8 @@ def _home_agent(answers):
             self.did.append(("tap", round(x * 1000), round(y * 1000)))
         async def go_home(self):
             self.did.append(("swipe home",))
+        async def double_tap(self, x, y, aim=False):
+            self.did.append(("double", round(x * 1000), round(y * 1000)))
 
     return Agent(phone=Phone(), screen=Screen(), actor=Actor(), planner=None, trace=Trace(None))
 
@@ -361,3 +363,40 @@ def test_home_taps_the_button_again_when_the_menu_does_not_show_up():
     agent.actor.chat = chat
     asyncio.run(agent._do({"action": "home"}))
     assert agent.phone.did == [("tap", 880, 770), ("tap", 880, 770), ("tap", 570, 855)]
+
+
+def test_home_by_double_tap_needs_one_located_spot(monkeypatch):
+    import asyncio
+
+    import hidagent.agent as agent_module
+    agent = _home_agent({"button": "750 945", "home": "none"})
+    agent.at_double_tap_home = True
+    monkeypatch.setattr(agent_module.vision, "changed", lambda *a, **k: True)
+    act = {"action": "home"}
+    asyncio.run(agent._do(act))
+    assert agent.phone.did == [("double", 750, 945)] and act["taps"] == [(750, 945)]
+
+
+def test_home_by_double_tap_taken_as_single_tap_uses_the_menu(monkeypatch):
+    import asyncio
+
+    import hidagent.agent as agent_module
+    agent = _home_agent({"button": "750 945", "home": "570 855"})  # the menu is there after the double tap
+    agent.at_double_tap_home = True
+    monkeypatch.setattr(agent_module.vision, "changed", lambda *a, **k: True)
+    asyncio.run(agent._do({"action": "home"}))
+    assert agent.phone.did == [("double", 750, 945), ("tap", 570, 855)]
+
+
+def test_home_by_double_tap_tries_twice_then_fails(monkeypatch):
+    import asyncio
+
+    import pytest
+
+    import hidagent.agent as agent_module
+    agent = _home_agent({"button": "750 945", "home": "none"})
+    agent.at_double_tap_home = True
+    monkeypatch.setattr(agent_module.vision, "changed", lambda *a, **k: False)
+    with pytest.raises(ValueError, match="changed nothing"):
+        asyncio.run(agent._do({"action": "home"}))
+    assert agent.phone.did == [("double", 750, 945), ("double", 750, 945)]

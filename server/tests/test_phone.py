@@ -71,3 +71,13 @@ def test_clear_field_selects_deletes_and_deletes_to_line_start(tmp_path):
     p = phone(tmp_path, [])
     asyncio.run(p.clear_field())
     assert p.device.sent == ["key cmd+a", "key backspace", "key cmd+backspace"]
+
+
+def test_double_tap_clicks_twice_without_moving_in_between(tmp_path, monkeypatch):
+    import hidagent.phone as phone_module
+    monkeypatch.setattr(phone_module, "DOUBLE_GAP", 0)
+    monkeypatch.setattr(phone_module, "TAP_GAP", 0)
+    p = phone(tmp_path, [])
+    asyncio.run(p.double_tap(0.5, 0.6))
+    sent = p.device.sent
+    assert sent[-2:] == ["click", "click"] and "click" not in sent[:-2]

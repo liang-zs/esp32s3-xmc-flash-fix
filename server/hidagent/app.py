@@ -30,7 +30,8 @@ agent = Agent(phone, screen, LLM.from_env("ACTOR"), LLM.from_env("PLANNER"),
               runs_file=DATA_DIR / "runs.jsonl",
               price=lambda when: price_at(when, os.environ.get("LLM_PRICE", ""), os.environ.get("LLM_PRICE_IDLE", ""),
                                           os.environ.get("LLM_PEAK_HOURS", "9-12,14-18")),
-              grid=os.environ.get("ACTOR_GRID") == "1")
+              grid=os.environ.get("ACTOR_GRID") == "1",
+              at_double_tap_home=os.environ.get("AT_DOUBLE_TAP_HOME") == "1")
 
 
 @asynccontextmanager

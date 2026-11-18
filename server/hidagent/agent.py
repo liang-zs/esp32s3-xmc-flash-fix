@@ -709,7 +709,10 @@ class BlindError(RuntimeError):
 FAST_ROUNDS = 3  # rounds on one plan step after which the actor thinks again
 AT_BUTTON_Q = ("Where is the center of the AssistiveTouch floating button (a translucent gray rounded square "
                "with a white circle in it, floating over the screen; not the small gray mouse pointer dot)?")
-AT_HOME_Q = "The AssistiveTouch menu is open. Where is the center of its Home item (icon with the label Home)?"
+# names the panel, so the Home app icon on the Home Screen is not taken for the menu item (the old question did)
+AT_HOME_Q = ("Is the AssistiveTouch menu open: a dark rounded panel floating over the screen with items such as "
+             "Notification Center, Device, Control Center, Siri, Home and Custom? If it is, where is the center of the "
+             "Home item inside that panel? An app icon named Home on the Home Screen is not it.")
 LOCATE_PROMPT = ("You locate keys on iPhone screenshots. Coordinates use a 0-1000 scale for x (left to right) "
                  "and y (top to bottom). Reply with the center of the key the user names.")
 GOAL_CHECK = ("First look at the screenshot: if it shows the goal reached by the actions of this task (e.g. the "
@@ -722,9 +725,12 @@ GRID_NOTE = ("\n\nThe screenshot has thin cyan grid lines every 100 units of the
 class Agent:
     def __init__(self, phone: Phone, screen: Screen, actor: LLM, planner: LLM, trace: Trace,
                  max_steps: int = 40, max_failures: int = 3, max_seconds: float = 300,
-                 runs_file: Path | None = None, price: str | Callable[[float], str] = "", grid: bool = False):
+                 runs_file: Path | None = None, price: str | Callable[[float], str] = "", grid: bool = False,
+                 at_double_tap_home: bool = False):
         self.phone, self.screen, self.actor, self.planner = phone, screen, actor, planner
         self.grid = grid  # draw a coordinate grid on the actor's screenshots (ACTOR_GRID=1)
+        # the phone's AssistiveTouch Double-Tap action is set to Home (AT_DOUBLE_TAP_HOME=1)
+        self.at_double_tap_home = at_double_tap_home
         self.trace = trace
         self.max_steps, self.max_failures = max_steps, max_failures
         self.max_seconds = max_seconds  # whole-task time limit: a hung step or a slow loop can't run forever
@@ -1168,6 +1174,8 @@ class Agent:
             log.warning("[HOME] no AssistiveTouch button on screen; swiping up from the bottom edge")
             await self.phone.go_home()
             return [(500, 995), (500, 600)]
+        if self.at_double_tap_home:
+            return await self._home_by_double_tap(button)
         item = None
         for attempt in range(2):  # iPhone 11, 2026-11-18: the menu did not show up after the first tap twice
             await self.phone.tap(button[0] / 1000, button[1] / 1000, aim=True)
@@ -1184,6 +1192,25 @@ class Agent:
         await self._tap_until_changed(item)
         log.info("[HOME] AssistiveTouch at %s, Home at %s", button, item)
         return [button, item]
+
+    async def _home_by_double_tap(self, button: tuple[int, int]) -> list[tuple[int, int]]:
+        """The phone's AssistiveTouch Double-Tap action is Home: double-tap the button in place (one located spot,
+        no menu). Taken as a single tap, it opens the menu (Single-Tap stays Open Menu): then tap Home there."""
+        spot = (button[0] / 1000, button[1] / 1000)
+        for attempt in range(2):
+            before = self.screen.frame
+            await self.phone.double_tap(*spot, aim=True)
+            await self.screen.settled(quiet=0.3, least=0.8, most=2.0)  # iOS waits out the double-tap timeout
+            item = await self._locate(AT_HOME_Q)
+            if item is not None:  # counted as a single tap: the menu opened
+                log.warning("[HOME] double tap opened the menu; tapping its Home at %s", item)
+                await self._tap_until_changed(item)
+                return [button, item]
+            if vision.changed(before, self.screen.frame, ignore=(spot,)):
+                log.info("[HOME] double tap on AssistiveTouch at %s", button)
+                return [button]
+            log.warning("[HOME] double tap %d at %s changed nothing", attempt + 1, button)
+        raise ValueError("home: double-tapping AssistiveTouch changed nothing")
 
     async def _tap_until_changed(self, spot: tuple[int, int], tries: int = 2) -> bool:
         """Tap, wait for the screen, and tap once more if nothing changed. iPhone 11, 2026-11-18: the first tap
