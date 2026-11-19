@@ -220,14 +220,17 @@ def test_press_locates_each_distinct_key_once_and_taps_in_order():
             self.taps = []
         async def tap(self, x, y, aim=False):
             self.taps.append((round(x * 1000), round(y * 1000)))
+            self.aims.append(aim)
 
     actor, phone = Actor(), Phone()
+    phone.aims = []
     agent = Agent(phone=phone, screen=Screen(), actor=actor, planner=actor, trace=Trace(None))
     act = {"action": "press", "keys": "1 2 8 × 2 ="}
     asyncio.run(agent._do(act))
     assert sorted(actor.asked) == sorted(set("1 2 8 × =".split()))  # "2" asked once
     assert phone.taps == [where[k] for k in "1 2 8 × 2 =".split()] == act["taps"]
     assert act["registered"] == [True] * 6
+    assert phone.aims == [True, False, False, False, False, False]  # only the first key is aimed
 
 
 def test_press_taps_a_digit_again_when_the_screen_did_not_change_but_never_an_operator():
@@ -250,7 +253,7 @@ def test_press_taps_a_digit_again_when_the_screen_did_not_change_but_never_an_op
     lost = {"first 1", "first x"}  # the first tap on 1 and on x change nothing
     seen = []
 
-    async def press_key(label, x, y):
+    async def press_key(label, x, y, aim=True):
         await agent.phone.tap(x / 1000, y / 1000, aim=True)
         key = ("first " if label not in seen else "again ") + label
         seen.append(label)

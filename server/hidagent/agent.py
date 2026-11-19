@@ -1005,6 +1005,8 @@ class Agent:
                 started = time.time()
                 await self._do(act)
                 act["act_s"] = round(time.time() - started, 2)
+                # where a run's time goes: acting (incl. locating and aiming), thinking (llm_s), settling
+                self.usage["act_s"] = round(self.usage.get("act_s", 0) + act["act_s"], 2)
 
                 spots += _pointer_path(act)
                 self._pointer = spots[-1]
@@ -1044,7 +1046,9 @@ class Agent:
                     return await self._handle_no_change("点击输入框后")
 
         # 本轮动作结束，等待屏幕稳定
+        started = time.time()
         await self.screen.settled()
+        self.usage["settle_s"] = round(self.usage.get("settle_s", 0) + time.time() - started, 2)
 
         self.task_ctx.transition(
             TaskState.VERIFY,
@@ -1214,10 +1218,10 @@ class Agent:
             return [{**a, "_shot": frame} for a in acts]  # every action is drawn on the same screenshot
         raise ValueError(f"actor gave no valid action: {reply[:200]}")
 
-    async def _press_key(self, label: str, x: int, y: int) -> bool:
+    async def _press_key(self, label: str, x: int, y: int, aim: bool = True) -> bool:
         """Tap one keypad key; True when the screen changed (a digit shows up on the display)."""
         before, started = self.screen.frame, time.time()
-        await self.phone.tap(x / 1000, y / 1000, aim=True)
+        await self.phone.tap(x / 1000, y / 1000, aim=aim)
         await self.screen.settled(quiet=0.15, least=0.3, most=1.0)
         hit = vision.changed(before, self.screen.frame)
         log.info("[PRESS] %s at (%d, %d): %s in %.2f s", label, x, y, "screen changed" if hit else "NO CHANGE",
@@ -1457,15 +1461,17 @@ class Agent:
             case "press":
                 a["taps"] = await self._locate_keys(a["keys"].split())
                 a["registered"], a["retapped"] = [], []
-                for label, (x, y) in zip(a["keys"].split(), a["taps"], strict=True):
-                    hit = await self._press_key(label, x, y)
+                for i, (label, (x, y)) in enumerate(zip(a["keys"].split(), a["taps"], strict=True)):
+                    # aim at the first key only: keypad keys are big, and the aimed first tap puts the pointer
+                    # where the next short moves start from (each aim costs ~1.3 s; 128 x 37 = was 42 s of pressing)
+                    hit = await self._press_key(label, x, y, aim=i == 0)
                     # iPhone 11, 2026-11-18: the first key of a sequence was lost 3 times in one run (128 came
                     # out as 28; not reproduced in 10 later sequences). A digit always changes the display, so one
                     # more tap is safe; operators and C/AC are never repeated (twice can change the meaning).
                     if not hit and re.fullmatch(r"[0-9.]", label):
                         log.warning("[PRESS] %s did not register; tapping it again", label)
                         a["retapped"].append(label)
-                        hit = await self._press_key(label, x, y)
+                        hit = await self._press_key(label, x, y, aim=True)
                     a["registered"].append(hit)
             case "key": await self.phone.key(a["combo"])
             case "home": a["taps"] = await self._home()
