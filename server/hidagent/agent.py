@@ -45,7 +45,11 @@ screens you have not seen. Later steps can stay general (e.g. "Draw the face on 
 To open an app, prefer search over paging through home screens: tap the "Search" pill above
 the dock (or swipe down from the middle of the home screen), type the app name, tap the result.
 To reach the Home Screen write the step as "Go to the Home Screen": the actor does it in one action
-through AssistiveTouch. Never plan a swipe up from the bottom edge (it does not work on this phone)."""
+through AssistiveTouch. Never plan a swipe up from the bottom edge (it does not work on this phone).
+Apps marked third-party in the goal's app names: open them from the App Library (go to the Home Screen,
+swipe left past the last page, tap the App Library search field, type the name, tap the app icon): it lists apps
+only, while Spotlight may offer just the app's page in Settings or web searches. Also when Spotlight's Top Hit
+for an app is a gear icon with that app's name (its page in Settings)."""
 
 
 ACTOR_PROMPT = """You are an AI agent controlling a real iPhone 11
@@ -309,6 +313,18 @@ Safari compass icon, or a magnifier icon, are web searches: tapping
 "notes" there opens Safari, not Notes (iPhone 11, 2026-11-18). If the
 app is not under Top Hit, use an app icon that shows the app's own
 icon and name, never a row with a Safari or magnifier icon.
+
+A Top Hit with the gray gear (Settings) icon but ANOTHER app's name
+(e.g. "bilibili", and "bilibili — Settings" in the search field) is
+that app's page in Settings, not the app: tapping it opens Settings
+(iPhone 11, 2026-11-19). Only "Settings" itself is the Settings app.
+When Spotlight offers the app only like that, use the App Library,
+which lists apps only:
+1. DO: home
+2. Swipe left (DO: swipe 850 450 150 450) page by page until the
+   page with the "App Library" search field at the top.
+3. DO: tapon App Library search field, then DO: type <app name>
+4. DO: tapon <app name> app icon
 
 Example:
 

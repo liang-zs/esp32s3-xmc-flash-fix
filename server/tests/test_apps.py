@@ -24,3 +24,9 @@ def test_everyday_words_count_only_after_an_opening_verb():
     assert "信息 = Messages" in app_hints("打开信息，看最新一条")
     assert "时钟 = Clock" in app_hints("打开时钟，切换到世界时钟页面，告诉我列出了哪些城市")
     assert app_hints("帮我查找一下") == ""
+
+
+def test_third_party_apps_go_through_the_app_library():
+    hint = app_hints("打开哔哩哔哩，搜索长安姑娘")
+    assert "哔哩哔哩 = bilibili (third-party: open it from the App Library" in hint
+    assert "App Library" not in app_hints("打开备忘录")

@@ -18,11 +18,15 @@ APPS: dict[str, str] = {
     "视频": "TV", "家庭": "Home", "无边记": "Freeform", "可立拍": "Clips", "翻译": "Translate",
     "指南针": "Compass", "测距仪": "Measure", "放大器": "Magnifier", "提示": "Tips", "健身": "Fitness",
     "应用商店": "App Store", "App Store": "App Store",
-    # third-party apps on this phone
+}
+# third-party apps on this phone. Spotlight is unreliable for them: for bilibili its Top Hit was the app's page in
+# Settings (gear icon) and the rest web searches (iPhone 11, 2026-11-19); the App Library search lists apps only.
+THIRD_PARTY: dict[str, str] = {
     "哔哩哔哩": "bilibili", "B站": "bilibili", "b站": "bilibili", "小红书": "rednote", "微信": "WeChat",
     "支付宝": "Alipay", "携程": "Trip.com", "谷歌翻译": "Google Translate", "谷歌地图": "Google Maps",
     "亚马逊": "Amazon", "脸书": "Facebook", "油管": "YouTube",
 }
+APPS.update(THIRD_PARTY)
 
 
 # also everyday words ("查看设备信息" is no request for Messages): only an app name right after an opening verb
@@ -39,6 +43,7 @@ def app_hints(task: str) -> str:
             continue
         if zh in COMMON_WORDS and not re.search(OPEN_VERB + re.escape(zh), rest):
             continue
-        found.append(f"{zh} = {APPS[zh]}")
+        found.append(f"{zh} = {APPS[zh]}" + (" (third-party: open it from the App Library, not Spotlight)"
+                                              if zh in THIRD_PARTY else ""))
         rest = rest.replace(zh, " ")
     return ("App names on this iPhone (search these, not the Chinese): " + "; ".join(found)) if found else ""
