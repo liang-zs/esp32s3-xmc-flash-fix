@@ -284,6 +284,10 @@ ONE_WORD_PROMPT = "You look at iPhone screenshots and answer questions about the
 KEYBOARD_Q = ("Which on-screen keyboard is showing? Look at the space bar: 'pinyin' if it reads 空格 or 选定 (Chinese "
               "Simplified Pinyin), 'english' if it reads space, 'other' for any other keyboard (emoji, Japanese, "
               "numbers), 'none' if no keyboard is showing. Answer with that one word.")
+AT_BUTTON_AT_Q = ("Is the AssistiveTouch floating button (a translucent gray rounded square with a white circle in it) "
+                   "centered at about x={x}, y={y} on the 0-1000 grid, within 40 units? It may sit over the "
+                   "keyboard's bottom row or a toolbar. The small plain gray dot is the mouse pointer, not the "
+                   "button. Answer yes or no.")
 IS_HOME_PROMPT = "You look at iPhone screenshots and answer questions about them with one word: yes or no."
 IS_HOME_Q = ("Is this the iPhone Home Screen: a page of app icons with names, with the Dock row of apps at the "
              "bottom (or the App Library page), and no app open, no full-screen video, no search screen? "
@@ -774,6 +778,14 @@ class Agent:
         current frame. iPhone 11, 2026-11-18: going home took the actor 2-4 rounds (button, look, Home, look,
         misses in between); cmd+h does nothing on iPhone. Offline: button found 8/8, menu Home 8/8 (the button
         moves between runs, so it is never a fixed position). No button: the old bottom-edge swipe."""
+        known = self._known_at_button() if self.at_double_tap_home else None
+        if known and await self._button_at(known):
+            # fast path (iPhone 11: the button stayed at 750 947 for days, keyboard up or not): no pointer parking,
+            # no two locate questions. A double tap that does not reach the Home Screen falls back to the full search.
+            try:
+                return await self._home_by_double_tap(known)
+            except ValueError as e:
+                log.warning("[HOME] remembered spot %s did not work (%s); looking for the button", known, e)
         button = await self._locate_at_button()
         if button is None:  # the menu may be open already (it hides the button)
             item = await self._locate(AT_HOME_Q)
@@ -869,6 +881,23 @@ class Agent:
             log.warning("[PINYIN] text entered, but the keyboard did not go back to English (%s)", seen[-1])
         return seen
 
+    async def _button_at(self, spot: tuple[int, int]) -> bool:
+        """Is the AssistiveTouch button at `spot`? One yes/no question. Offline: yes 8/8 where it was (keyboard up,
+        Safari toolbar), no 3/3 on full-screen video frames (where a double tap 'likes' a bilibili video)."""
+        frame = self.screen.frame
+        image = vision.grid(frame) if self.grid else frame
+        q = AT_BUTTON_AT_Q.format(x=spot[0], y=spot[1])
+        fast = bool(getattr(self.actor, "fast_extra", None))
+        system = IS_HOME_PROMPT + (GRID_NOTE if self.grid else "")
+        reply = await (self.actor.chat(system, q, image, max_tokens=300, fast=True) if fast
+                       else self.actor.chat(system, q, image))
+        for k, v in (getattr(self.actor, "last_usage", {}) or {}).items():
+            self.usage[k] = self.usage.get(k, 0) + v
+        self.usage["calls"] = self.usage.get("calls", 0) + 1
+        yes = (reply.strip().splitlines()[-1].strip().lower() if reply.strip() else "").startswith("yes")
+        self.trace.write(frame, kind="locate", question=q, reply=reply[-40:], spot=list(spot) if yes else None)
+        return yes
+
     async def _is_home_screen(self) -> bool:
         """One fast yes/no question about the current frame: is this the Home Screen?"""
         frame = self.screen.frame
@@ -912,14 +941,15 @@ class Agent:
             before = self.screen.frame
             await self.phone.double_tap(*spot, aim=True)
             await self.screen.settled(quiet=0.3, least=0.8, most=2.0)  # iOS waits out the double-tap timeout
-            item = await self._locate(AT_HOME_Q)
+            # both questions at once: did the menu open (taken as a single tap), or is this the Home Screen
+            item, home = await asyncio.gather(self._locate(AT_HOME_Q), self._is_home_screen())
             if item is not None:  # counted as a single tap: the menu opened
                 log.warning("[HOME] double tap opened the menu; tapping its Home at %s", item)
                 await self._tap_until_changed(item)
                 self._remember_at_button(button)
                 return [button, item]
             # "the screen changed" is no proof: a playing video changes all the time (iPhone 11, 2026-11-19)
-            if vision.changed(before, self.screen.frame, ignore=(spot,)) and await self._is_home_screen():
+            if home and vision.changed(before, self.screen.frame, ignore=(spot,)):
                 log.info("[HOME] double tap on AssistiveTouch at %s", button)
                 self._remember_at_button(button)
                 return [button]

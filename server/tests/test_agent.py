@@ -284,6 +284,8 @@ def _home_agent(answers):
     class Actor:
         model, fast_extra, last_usage = "fake", {"thinking": {"type": "disabled"}}, {}
         async def chat(self, system, text, image=None, max_tokens=600, temperature=0, fast=False):
+            if "centered at about" in text:
+                return answers.get("button_at", "no")
             if "Answer yes or no" in text:
                 return answers.get("is_home", "yes")
             return answers["home" if "Home item" in text else "button"]
@@ -543,3 +545,39 @@ def test_pinyin_fails_when_it_cannot_reach_pinyin_and_falls_back_without_a_keybo
 
 async def _no_sleep(*a, **k):
     pass
+
+
+def test_home_fast_path_double_taps_the_remembered_spot_without_searching(tmp_path, monkeypatch):
+    import asyncio
+    import json
+
+    import hidagent.agent as agent_module
+    (tmp_path / "assistivetouch.json").write_text(json.dumps({"button": [750, 947]}))
+    agent = _home_agent({"button": "none", "home": "none", "button_at": "yes", "is_home": "yes"})
+    agent.runs_file, agent.at_double_tap_home = tmp_path / "runs.jsonl", True
+    monkeypatch.setattr(agent_module.vision, "changed", lambda *a, **k: True)
+    act = {"action": "home"}
+    asyncio.run(agent._do(act))
+    assert agent.phone.did == [("double", 750, 947)] and agent.phone.moves == []  # no pointer parking, no search
+    assert act["taps"] == [(750, 947)]
+
+
+def test_home_fast_path_falls_back_to_the_search_when_it_does_not_reach_home(tmp_path, monkeypatch):
+    import asyncio
+    import json
+
+    import hidagent.agent as agent_module
+    (tmp_path / "assistivetouch.json").write_text(json.dumps({"button": [750, 947]}))
+    answers = {"button": "880 770", "home": "none", "button_at": "yes", "is_home": "no"}
+    agent = _home_agent(answers)
+    agent.runs_file, agent.at_double_tap_home = tmp_path / "runs.jsonl", True
+    monkeypatch.setattr(agent_module.vision, "changed", lambda *a, **k: True)
+    double = agent.phone.double_tap
+
+    async def counted(x, y, aim=False):  # the remembered spot fails twice, then the found button works
+        await double(x, y, aim)
+        answers["is_home"] = "yes" if len(agent.phone.did) > 2 else "no"
+    agent.phone.double_tap = counted
+    asyncio.run(agent._do({"action": "home"}))
+    assert agent.phone.did[:2] == [("double", 750, 947), ("double", 750, 947)]
+    assert agent.phone.did[2:] == [("double", 880, 770)] and agent.phone.moves == [(500, 500)]
