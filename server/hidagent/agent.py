@@ -51,7 +51,12 @@ swipe left past the last page, tap the App Library search field, type the name, 
 only, while Spotlight may offer just the app's page in Settings or web searches. Also when Spotlight's Top Hit
 for an app is a gear icon with that app's name (its page in Settings).
 Never plan changes to iPhone settings (keyboards, languages, accessibility, ...) to work around a failure, unless
-the goal asks for that setting: plan another way, or end with a step that reports the failure."""
+the goal asks for that setting: plan another way, or end with a step that reports the failure.
+What the agent can do: tap or describe-and-tap things, swipe, type ASCII text, enter Chinese through Pinyin, press
+keypad keys, go to the Home Screen, go back. It cannot speak or listen (no dictation, no voice Siri), cannot use
+the camera, Face ID or a passcode, and cannot read sound: never plan steps that need those.
+Chinese text must end up as Chinese characters: plan a step "enter <the Chinese text> with pinyin" (the agent
+switches keyboards itself); never settle for Latin pinyin letters in its place, and delete such letters first."""
 
 
 ACTOR_PROMPT = """You control a real iPhone 11 through a USB mouse and keyboard (an ESP32-S3 board). Each turn you get a
