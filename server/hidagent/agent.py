@@ -49,7 +49,9 @@ through AssistiveTouch. Never plan a swipe up from the bottom edge (it does not 
 Apps marked third-party in the goal's app names: open them from the App Library (go to the Home Screen,
 swipe left past the last page, tap the App Library search field, type the name, tap the app icon): it lists apps
 only, while Spotlight may offer just the app's page in Settings or web searches. Also when Spotlight's Top Hit
-for an app is a gear icon with that app's name (its page in Settings)."""
+for an app is a gear icon with that app's name (its page in Settings).
+Never plan changes to iPhone settings (keyboards, languages, accessibility, ...) to work around a failure, unless
+the goal asks for that setting: plan another way, or end with a step that reports the failure."""
 
 
 ACTOR_PROMPT = """You are an AI agent controlling a real iPhone 11
@@ -543,6 +545,13 @@ Avoid unintended:
 If a task only requires viewing information,
 do not modify settings.
 
+Never change iPhone settings (keyboards, languages, accessibility,
+AssistiveTouch, display, privacy, ...) to work around a problem,
+unless the task itself asks for that setting. If an action keeps
+failing, try another way inside the task, or DO: fail <reason>.
+(iPhone 11, 2026-11-19: after Pinyin input failed, a plan went to
+Settings > Keyboards to add a keyboard; that is never allowed.)
+
 Stop when the requested task is complete.
 
 ==================================================
@@ -585,6 +594,8 @@ APP NOTES:
   turns lighter. Tap an operator once, then go on with the next
   number; never tap it again because the display looks the same.
 - The app ignores the keyboard ("type" does nothing there).
+- Notes: the new-note button (square with a pencil) is at the BOTTOM
+  right of the notes list: DO: tapon new note button at bottom right.
 
 NOTE:
 "home" goes to the Home Screen through AssistiveTouch
@@ -760,6 +771,11 @@ AT_HOME_Q = ("Is the AssistiveTouch menu open: a dark rounded panel floating ove
              "Home item inside that panel? An app icon named Home on the Home Screen is not it.")
 # wording matters: "You locate things ... the thing the user describes" made the locator answer none for the
 # AssistiveTouch button on 6 of 10 tries on two frames; this wording found it 10 of 10
+KEYBOARD_SWITCH = 1.2  # seconds after ctrl+space before looking: by hand, 1.5 s worked and 0.4 s did not
+ONE_WORD_PROMPT = "You look at iPhone screenshots and answer questions about them with one word."
+KEYBOARD_Q = ("Which on-screen keyboard is showing? Look at the space bar: 'pinyin' if it reads 空格 or 选定 (Chinese "
+              "Simplified Pinyin), 'english' if it reads space, 'other' for any other keyboard (emoji, Japanese, "
+              "numbers), 'none' if no keyboard is showing. Answer with that one word.")
 IS_HOME_PROMPT = "You look at iPhone screenshots and answer questions about them with one word: yes or no."
 IS_HOME_Q = ("Is this the iPhone Home Screen: a page of app icons with names, with the Dock row of apps at the "
              "bottom (or the App Library page), and no app open, no full-screen video, no search screen? "
@@ -1294,6 +1310,53 @@ class Agent:
                     park, f"using where it was last time, {known}" if known else "no earlier position")
         return known
 
+    async def _keyboard(self) -> str:
+        """Which on-screen keyboard shows: pinyin, english, other or none (one fast question on the frame)."""
+        frame = self.screen.frame
+        fast = bool(getattr(self.actor, "fast_extra", None))
+        reply = await (self.actor.chat(ONE_WORD_PROMPT, KEYBOARD_Q, frame, max_tokens=300, fast=True) if fast
+                       else self.actor.chat(ONE_WORD_PROMPT, KEYBOARD_Q, frame))
+        for k, v in (getattr(self.actor, "last_usage", {}) or {}).items():
+            self.usage[k] = self.usage.get(k, 0) + v
+        self.usage["calls"] = self.usage.get("calls", 0) + 1
+        last = reply.strip().splitlines()[-1].lower() if reply.strip() else ""
+        kind = ("pinyin" if any(w in last for w in ("pinyin", "空格", "选定")) else "english" if "english" in last
+                else "none" if "none" in last else "other")
+        self.trace.write(frame, kind="locate", question=KEYBOARD_Q, reply=reply[-60:], spot=None, keyboard=kind)
+        return kind
+
+    async def _switch_keyboard(self, want: str, tries: int = 3) -> str:
+        """ctrl+space until the on-screen keyboard is `want`; returns the keyboard it ended on."""
+        kind = await self._keyboard()
+        for _ in range(tries):
+            if kind in (want, "none"):
+                break
+            await self.phone.key("ctrl+space")
+            await asyncio.sleep(KEYBOARD_SWITCH)  # the input-source picker shows for a moment
+            await self.screen.settled(quiet=0.3, least=0.3, most=1.5)
+            kind = await self._keyboard()
+        return kind
+
+    async def _pinyin(self, letters: str) -> list[str]:
+        """Chinese text: make sure the Simplified Pinyin keyboard is on (look, don't assume), type the letters, take
+        the first candidate with space, and go back to English. iPhone 11, 2026-11-19: the blind version (ctrl+space,
+        0.4 s, type) typed Latin 'ceshibiji' into Notes: the switch had not finished, or the keyboard was already
+        Pinyin and ctrl+space switched it away. Done by hand with 1.5 s waits it gave 测试."""
+        seen = [await self._switch_keyboard("pinyin")]
+        if seen[0] == "none":  # no on-screen keyboard to look at: the old blind sequence
+            await self.phone.pinyin(letters)
+            return seen
+        if seen[0] != "pinyin":
+            raise ValueError(f"pinyin: could not switch to the Simplified Pinyin keyboard (it shows {seen[0]})")
+        await self.phone.type(letters)
+        await asyncio.sleep(0.8)  # let the candidate bar fill before taking the first one
+        await self.phone.key("space")
+        await asyncio.sleep(0.5)
+        seen.append(await self._switch_keyboard("english"))
+        if seen[-1] != "english":
+            log.warning("[PINYIN] text entered, but the keyboard did not go back to English (%s)", seen[-1])
+        return seen
+
     async def _is_home_screen(self) -> bool:
         """One fast yes/no question about the current frame: is this the Home Screen?"""
         frame = self.screen.frame
@@ -1389,7 +1452,7 @@ class Agent:
             case "path": await self.phone.drag([(x / 1000, y / 1000) for x, y in a["points"]])
             case "circle": await self.phone.drag(circle(p("x"), p("y"), p("r"), self.screen.aspect))
             case "type": await self.phone.type(a["text"])
-            case "pinyin": await self.phone.pinyin(a["text"])
+            case "pinyin": a["keyboards"] = await self._pinyin(a["text"])
             case "clear": await self.phone.clear_field()
             case "press":
                 a["taps"] = await self._locate_keys(a["keys"].split())

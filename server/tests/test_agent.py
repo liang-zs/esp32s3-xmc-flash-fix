@@ -473,3 +473,70 @@ def test_a_landscape_screen_stops_the_agent():
         asyncio.run(agent.go_home())
     with pytest.raises(LandscapeError):
         asyncio.run(agent._ask("actor", agent.actor, "SYS", "go"))
+
+
+def _pinyin_agent(keyboards):
+    """An agent whose keyboard question is answered from `keyboards` in turn; the phone logs keys and text."""
+    import hidagent.agent as agent_module
+    from hidagent.agent import Agent
+    from hidagent.debug import Trace
+    agent_module.KEYBOARD_SWITCH = 0
+    answers = iter(keyboards)
+
+    class Screen:
+        live, frame, aspect = True, None, 0.46
+        async def settled(self, **kw):
+            pass
+
+    class Actor:
+        model, fast_extra, last_usage = "fake", {"thinking": {"type": "disabled"}}, {}
+        async def chat(self, system, text, image=None, max_tokens=600, temperature=0, fast=False):
+            return next(answers)
+
+    class Phone:
+        def __init__(self):
+            self.sent = []
+        async def key(self, combo):
+            self.sent.append(f"key {combo}")
+        async def type(self, text):
+            self.sent.append(f"type {text}")
+        async def pinyin(self, letters):
+            self.sent.append(f"blind pinyin {letters}")
+
+    return Agent(phone=Phone(), screen=Screen(), actor=Actor(), planner=None, trace=Trace(None))
+
+
+def test_pinyin_switches_only_when_the_keyboard_is_not_pinyin(monkeypatch):
+    import asyncio
+
+    import hidagent.agent as agent_module
+    monkeypatch.setattr(agent_module.asyncio, "sleep", _no_sleep)
+    agent = _pinyin_agent(["english", "pinyin", "pinyin", "english"])  # look, switch, look; after: look, switch, look
+    act = {"action": "pinyin", "text": "ceshi"}
+    asyncio.run(agent._do(act))
+    assert agent.phone.sent == ["key ctrl+space", "type ceshi", "key space", "key ctrl+space"]
+    assert act["keyboards"] == ["pinyin", "english"]
+    # iPhone 11, 2026-11-19: the keyboard was already Pinyin and the blind ctrl+space switched it away
+    agent = _pinyin_agent(["选定", "pinyin", "english"])
+    asyncio.run(agent._do({"action": "pinyin", "text": "biji"}))
+    assert agent.phone.sent == ["type biji", "key space", "key ctrl+space"]
+
+
+def test_pinyin_fails_when_it_cannot_reach_pinyin_and_falls_back_without_a_keyboard(monkeypatch):
+    import asyncio
+
+    import pytest
+
+    import hidagent.agent as agent_module
+    monkeypatch.setattr(agent_module.asyncio, "sleep", _no_sleep)
+    agent = _pinyin_agent(["english", "other", "english", "other"])
+    with pytest.raises(ValueError, match="could not switch"):
+        asyncio.run(agent._do({"action": "pinyin", "text": "ceshi"}))
+    assert "type ceshi" not in agent.phone.sent
+    agent = _pinyin_agent(["none"])
+    asyncio.run(agent._do({"action": "pinyin", "text": "ceshi"}))
+    assert agent.phone.sent == ["blind pinyin ceshi"]
+
+
+async def _no_sleep(*a, **k):
+    pass
