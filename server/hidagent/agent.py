@@ -733,6 +733,13 @@ class BlindError(RuntimeError):
     """The screen feed is gone; acting now would be guessing."""
 
 
+class LandscapeError(BlindError):
+    """The phone shows a landscape screen (e.g. a full-screen video). Pointer calibration, the AssistiveTouch spot
+    and every coordinate assume portrait; iPhone 11, 2026-11-19: a bilibili video went full screen in landscape,
+    the AssistiveTouch button was hidden and two tasks double-tapped the video (likely 'liking' it) until they
+    failed. Stop and ask for portrait instead."""
+
+
 FAST_ROUNDS = 3  # rounds on one plan step after which the actor thinks again
 # Two wordings, asked together: each found the button where the other did not. iPhone 11, 2026-11-18: on a black
 # Notes screen with the button at the bottom edge the first answered the mouse pointer (600, 600) four times in a
@@ -753,6 +760,10 @@ AT_HOME_Q = ("Is the AssistiveTouch menu open: a dark rounded panel floating ove
              "Home item inside that panel? An app icon named Home on the Home Screen is not it.")
 # wording matters: "You locate things ... the thing the user describes" made the locator answer none for the
 # AssistiveTouch button on 6 of 10 tries on two frames; this wording found it 10 of 10
+IS_HOME_PROMPT = "You look at iPhone screenshots and answer questions about them with one word: yes or no."
+IS_HOME_Q = ("Is this the iPhone Home Screen: a page of app icons with names, with the Dock row of apps at the "
+             "bottom (or the App Library page), and no app open, no full-screen video, no search screen? "
+             "Answer yes or no.")
 LOCATE_PROMPT = ("You locate keys on iPhone screenshots. Coordinates use a 0-1000 scale for x (left to right) "
                  "and y (top to bottom). Reply with the center of the key the user names.")
 # only for things named by their text (tapon, press): on the textless, faint AssistiveTouch button it made the
@@ -842,6 +853,9 @@ class Agent:
                    temperature: float = 0, fast: bool = False, why: str = "") -> tuple[str, float, bytes | None]:
         if not self.screen.live:  # never let the model act blind
             raise BlindError("lost the phone screen: reconnect Screen Mirroring")
+        if self.screen.aspect > 1:
+            raise LandscapeError("the phone screen is landscape (a full-screen video?): turn it back to portrait "
+                                 "(and lock portrait orientation), then run the task again")
         self.task_ctx.transition(
             TaskState.OBSERVE,
             f"读取当前截图，准备调用 {role}"
@@ -932,6 +946,8 @@ class Agent:
             await self._release()
         except asyncio.CancelledError:
             self._record(action="stopped")
+        except BlindError as e:  # no screen, or a landscape one: acting would be guessing
+            self._record(action="fail", reason=str(e))
         except Exception as e:  # e.g. the planner itself is unreachable
             self._record(action="error", reason=repr(e))
 
@@ -1221,6 +1237,8 @@ class Agent:
         """The home action outside a task (e.g. before a regression run starts)."""
         if self.running:
             raise RuntimeError("agent is running")
+        if self.screen.aspect > 1:
+            raise LandscapeError("the phone screen is landscape (a full-screen video?): turn it back to portrait")
         return await self._home()
 
     async def _home(self) -> list[tuple[int, int]]:
@@ -1276,6 +1294,20 @@ class Agent:
                     park, f"using where it was last time, {known}" if known else "no earlier position")
         return known
 
+    async def _is_home_screen(self) -> bool:
+        """One fast yes/no question about the current frame: is this the Home Screen?"""
+        frame = self.screen.frame
+        fast = bool(getattr(self.actor, "fast_extra", None))
+        reply = await (self.actor.chat(IS_HOME_PROMPT, IS_HOME_Q, frame, max_tokens=300, fast=True) if fast
+                       else self.actor.chat(IS_HOME_PROMPT, IS_HOME_Q, frame))
+        for k, v in (getattr(self.actor, "last_usage", {}) or {}).items():
+            self.usage[k] = self.usage.get(k, 0) + v
+        self.usage["calls"] = self.usage.get("calls", 0) + 1
+        last = reply.strip().splitlines()[-1].strip().lower() if reply.strip() else ""
+        yes = last.startswith("yes")
+        self.trace.write(frame, kind="locate", question=IS_HOME_Q, reply=reply[-80:], spot=None, home=yes)
+        return yes
+
     def _at_file(self) -> Path | None:
         return self.runs_file.parent / "assistivetouch.json" if self.runs_file else None
 
@@ -1311,7 +1343,8 @@ class Agent:
                 await self._tap_until_changed(item)
                 self._remember_at_button(button)
                 return [button, item]
-            if vision.changed(before, self.screen.frame, ignore=(spot,)):
+            # "the screen changed" is no proof: a playing video changes all the time (iPhone 11, 2026-11-19)
+            if vision.changed(before, self.screen.frame, ignore=(spot,)) and await self._is_home_screen():
                 log.info("[HOME] double tap on AssistiveTouch at %s", button)
                 self._remember_at_button(button)
                 return [button]

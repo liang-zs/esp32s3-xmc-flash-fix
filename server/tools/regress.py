@@ -40,8 +40,14 @@ def go_home(c: httpx.Client) -> None:
     time.sleep(2)
 
 
+class Landscape(RuntimeError):
+    pass
+
+
 def run_one(c: httpx.Client, task: dict) -> dict:
     c.post("/api/agent/clear")
+    if status(c)["aspect"] > 1:  # e.g. the previous task left a full-screen video: everything assumes portrait
+        raise Landscape("the phone screen is landscape (a full-screen video?): turn it back to portrait")
     go_home(c)
     r = c.post("/api/agent", json={"text": task["task"]})
     r.raise_for_status()
@@ -74,9 +80,16 @@ def main() -> None:
         if not (s["board"]["connected"] and s["screen"]):
             raise SystemExit(f"phone not ready: board {s['board']['connected']}, screen {s['screen']}")
         rows = []
+        stop = False
         for task in tasks:
             for _ in range(args.n):
-                row = {"time": time.strftime("%Y-%m-%d %H:%M:%S"), "commit": commit, **run_one(c, task)}
+                try:
+                    result = run_one(c, task)
+                except Landscape as e:
+                    print(f"STOPPED before {task['id']}: {e}")
+                    stop = True
+                    break
+                row = {"time": time.strftime("%Y-%m-%d %H:%M:%S"), "commit": commit, **result}
                 rows.append(row)
                 OUT.parent.mkdir(exist_ok=True)
                 with OUT.open("a") as f:
@@ -84,7 +97,11 @@ def main() -> None:
                 print(f"{row['verdict']:7s} {row['id']:16s} {row['seconds']:6.1f}s "
                       f"{row['actions']:3d} acts  {row['result']:7s} {row['answer'] or row['reason']}"[:200],
                       flush=True)
+            if stop:
+                break
     ok = [r for r in rows if r["ok"]]
+    if not rows:
+        return
     print(f"\n{len(ok)}/{len(rows)} passed, {commit}; average {sum(r['seconds'] for r in rows) / len(rows):.0f} s, "
           f"cost {sum(r['cost'] or 0 for r in rows):.3f}")
 

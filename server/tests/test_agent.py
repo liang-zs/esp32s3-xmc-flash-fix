@@ -281,6 +281,8 @@ def _home_agent(answers):
     class Actor:
         model, fast_extra, last_usage = "fake", {"thinking": {"type": "disabled"}}, {}
         async def chat(self, system, text, image=None, max_tokens=600, temperature=0, fast=False):
+            if "Answer yes or no" in text:
+                return answers.get("is_home", "yes")
             return answers["home" if "Home item" in text else "button"]
 
     class Phone:
@@ -442,3 +444,32 @@ def test_the_pointer_is_parked_in_the_middle_and_an_answer_there_is_the_pointer(
         return "none" if "Home item" in text else "505 520"
     agent.actor.chat = pointer_only
     assert asyncio.run(agent._locate_at_button()) is None
+
+
+def test_home_by_double_tap_needs_the_home_screen_not_just_a_change(monkeypatch):
+    import asyncio
+
+    import pytest
+
+    import hidagent.agent as agent_module
+    # iPhone 11, 2026-11-19: a full-screen video changes all the time; the double tap 'worked' every round
+    agent = _home_agent({"button": "790 940", "home": "none", "is_home": "no"})
+    agent.at_double_tap_home = True
+    monkeypatch.setattr(agent_module.vision, "changed", lambda *a, **k: True)
+    with pytest.raises(ValueError, match="changed nothing"):
+        asyncio.run(agent._do({"action": "home"}))
+    assert agent.phone.did == [("double", 790, 940), ("double", 790, 940)]
+
+
+def test_a_landscape_screen_stops_the_agent():
+    import asyncio
+
+    import pytest
+
+    from hidagent.agent import LandscapeError
+    agent = _home_agent({"button": "750 945", "home": "none"})
+    type(agent.screen).aspect = 16 / 9
+    with pytest.raises(LandscapeError):
+        asyncio.run(agent.go_home())
+    with pytest.raises(LandscapeError):
+        asyncio.run(agent._ask("actor", agent.actor, "SYS", "go"))
