@@ -44,25 +44,37 @@ class Landscape(RuntimeError):
     pass
 
 
-def run_one(c: httpx.Client, task: dict) -> dict:
+def run_agent(c: httpx.Client, text: str, wait: float = 3) -> tuple[dict, dict]:
+    """Start the agent on `text` from the Home Screen and wait; the run summary and the final status."""
     c.post("/api/agent/clear")
     if status(c)["aspect"] > 1:  # e.g. the previous task left a full-screen video: everything assumes portrait
         raise Landscape("the phone screen is landscape (a full-screen video?): turn it back to portrait")
     go_home(c)
-    r = c.post("/api/agent", json={"text": task["task"]})
+    r = c.post("/api/agent", json={"text": text})
     r.raise_for_status()
-    time.sleep(3)
+    time.sleep(wait)
     while (s := status(c))["agent"]["running"]:
-        time.sleep(3)
-    run = c.get("/api/runs", params={"last": 1}).json()["runs"][-1]
+        time.sleep(wait)
+    return c.get("/api/runs", params={"last": 1}).json()["runs"][-1], s
+
+
+def run_one(c: httpx.Client, task: dict, wait: float = 3) -> dict:
+    run, s = run_agent(c, task["task"], wait)
     last = s["agent"]["steps"][-1] if s["agent"]["steps"] else {}
     answer = str(last.get("answer", ""))
     verdict = judge(task, run["result"], answer, run["actions"])
-    return {"id": task["id"], "ok": verdict == "PASS", "verdict": verdict, "result": run["result"],
-            "answer": answer[:200],
-            "reason": run.get("reason", ""), "seconds": run["seconds"], "actions": run["actions"],
-            "calls": run.get("calls"), "fast_calls": run.get("fast_calls"), "llm_s": run.get("llm_s"),
-            "cost": run.get("cost"), "think": {k: v for k, v in run.items() if k.startswith("think_")}}
+    row = {"id": task["id"], "ok": verdict == "PASS", "verdict": verdict, "result": run["result"],
+           "answer": answer[:200],
+           "reason": run.get("reason", ""), "seconds": run["seconds"], "actions": run["actions"],
+           "calls": run.get("calls"), "fast_calls": run.get("fast_calls"), "llm_s": run.get("llm_s"),
+           "cost": run.get("cost"), "think": {k: v for k, v in run.items() if k.startswith("think_")}}
+    if task.get("teardown"):  # undo what the task left on the phone (a test note, a playing video); not scored
+        try:
+            done, _ = run_agent(c, task["teardown"], wait)
+            row["teardown"] = done["result"] + (f": {done.get('reason', '')}" if done.get("reason") else "")
+        except Landscape as e:
+            row["teardown"] = f"skipped: {e}"
+    return row
 
 
 def main() -> None:
@@ -95,8 +107,8 @@ def main() -> None:
                 with OUT.open("a") as f:
                     f.write(json.dumps(row, ensure_ascii=False) + "\n")
                 print(f"{row['verdict']:7s} {row['id']:16s} {row['seconds']:6.1f}s "
-                      f"{row['actions']:3d} acts  {row['result']:7s} {row['answer'] or row['reason']}"[:200],
-                      flush=True)
+                      f"{row['actions']:3d} acts  {row['result']:7s} {row['answer'] or row['reason']}"[:200]
+                      + (f"  [teardown: {row['teardown']}]" if "teardown" in row else ""), flush=True)
             if stop:
                 break
     ok = [r for r in rows if r["ok"]]

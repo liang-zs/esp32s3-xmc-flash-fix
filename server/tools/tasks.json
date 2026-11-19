@@ -48,11 +48,13 @@
   {
     "id": "notes-chinese",
     "task": "打开备忘录，新建一条备忘录，输入测试笔记，然后回到主屏幕",
-    "note": "creates a note each run (delete afterwards); pinyin inside a text editor"
+    "note": "creates a note each run (delete afterwards); pinyin inside a text editor",
+    "teardown": "打开备忘录，删除内容为“测试笔记”的那条备忘录，然后回到主屏幕"
   },
   {
     "id": "bilibili-search",
     "task": "打开哔哩哔哩，搜索长安姑娘，打开第一个视频",
-    "note": "third-party app, Chinese input through pinyin; last in the set: it ends with a video playing (it went full screen in landscape once)"
+    "note": "third-party app, Chinese input through pinyin; last in the set: it ends with a video playing (it went full screen in landscape once)",
+    "teardown": "关闭正在播放的视频页面（不要点赞、投币或收藏），然后回到主屏幕"
   }
 ]
