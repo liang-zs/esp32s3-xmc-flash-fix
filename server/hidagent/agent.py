@@ -728,6 +728,10 @@ AT_BUTTON_Q2 = ("Where is the center of the AssistiveTouch floating button? It i
 AT_BUTTON_Q = ("Where is the center of the AssistiveTouch floating button (a translucent gray rounded square "
                "with a white circle in it, floating over the screen; not the small gray mouse pointer dot)?")
 # names the panel, so the Home app icon on the Home Screen is not taken for the menu item (the old question did)
+# iPhone 11, 2026-11-19: with the keyboard up the button sat over its bottom row (next to the microphone) and
+# neither wording found it on 7 of 8 frames; with this sentence one of them did on 7 of 8 (no change without one)
+AT_KEYBOARD = (" With the on-screen keyboard showing, it often sits over the keyboard's bottom row (next to the globe "
+               "or microphone key) or just above the keyboard; it is not a keyboard key.")
 AT_HOME_Q = ("Is the AssistiveTouch menu open: a dark rounded panel floating over the screen with items such as "
              "Notification Center, Device, Control Center, Siri, Home and Custom? If it is, where is the center of the "
              "Home item inside that panel? An app icon named Home on the Home Screen is not it.")
@@ -1215,9 +1219,9 @@ class Agent:
                 await self._tap_until_changed(item)
                 log.info("[HOME] AssistiveTouch menu was open; Home at %s", item)
                 return [item]
-            log.warning("[HOME] no AssistiveTouch button on screen; swiping up from the bottom edge")
-            await self.phone.go_home()
-            return [(500, 995), (500, 600)]
+            # no bottom-edge swipe: it is unreliable here, and with the keyboard up iOS's slide-to-type read it as
+            # the word "by" (iPhone 11, 2026-11-19: "by by by" in Safari's search field after failed homes)
+            raise ValueError("home: no AssistiveTouch button found on screen")
         if self.at_double_tap_home:
             return await self._home_by_double_tap(button)
         item = None
@@ -1235,6 +1239,7 @@ class Agent:
             raise ValueError("home: the AssistiveTouch menu did not open (no Home item on screen)")
         await self._tap_until_changed(item)
         log.info("[HOME] AssistiveTouch at %s, Home at %s", button, item)
+        self._remember_at_button(button)
         return [button, item]
 
     async def _locate_at_button(self) -> tuple[int, int] | None:
@@ -1245,13 +1250,36 @@ class Agent:
         await self.phone.point(*POINTER_PARK)
         self._pointer = POINTER_PARK
         await self.screen.settled(quiet=0.2, least=0.4, most=1.0)
-        found = await asyncio.gather(self._locate(AT_BUTTON_Q2), self._locate(AT_BUTTON_Q))
+        found = await asyncio.gather(self._locate(AT_BUTTON_Q2 + AT_KEYBOARD), self._locate(AT_BUTTON_Q + AT_KEYBOARD))
         park = (POINTER_PARK[0] * 1000, POINTER_PARK[1] * 1000)
         for spot in found:
             if spot is not None and math.dist(spot, park) > 120:
                 return spot
-        log.warning("[HOME] AssistiveTouch button not found (answers %s; the pointer is parked at %s)", found, park)
-        return None
+        known = self._known_at_button()
+        log.warning("[HOME] AssistiveTouch button not found (answers %s; the pointer is parked at %s); %s", found,
+                    park, f"using where it was last time, {known}" if known else "no earlier position")
+        return known
+
+    def _at_file(self) -> Path | None:
+        return self.runs_file.parent / "assistivetouch.json" if self.runs_file else None
+
+    def _known_at_button(self) -> tuple[int, int] | None:
+        """Where the button was when home last worked (it stays put: iPhone 11, 750 945-950 for days, keyboard or
+        not). Used when locating fails, e.g. the button over the keyboard or over Safari's toolbar."""
+        f = self._at_file()
+        try:
+            x, y = json.loads(f.read_text())["button"] if f and f.exists() else (None, None)
+        except (OSError, ValueError, KeyError, TypeError):
+            return None
+        return (int(x), int(y)) if x is not None else None
+
+    def _remember_at_button(self, spot: tuple[int, int]) -> None:
+        f = self._at_file()
+        if f:
+            try:
+                f.write_text(json.dumps({"button": list(spot), "time": time.strftime("%Y-%m-%d %H:%M:%S")}))
+            except OSError as e:
+                log.warning("could not save %s: %s", f, e)
 
     async def _home_by_double_tap(self, button: tuple[int, int]) -> list[tuple[int, int]]:
         """The phone's AssistiveTouch Double-Tap action is Home: double-tap the button in place (one located spot,
@@ -1265,9 +1293,11 @@ class Agent:
             if item is not None:  # counted as a single tap: the menu opened
                 log.warning("[HOME] double tap opened the menu; tapping its Home at %s", item)
                 await self._tap_until_changed(item)
+                self._remember_at_button(button)
                 return [button, item]
             if vision.changed(before, self.screen.frame, ignore=(spot,)):
                 log.info("[HOME] double tap on AssistiveTouch at %s", button)
+                self._remember_at_button(button)
                 return [button]
             log.warning("[HOME] double tap %d at %s changed nothing", attempt + 1, button)
         raise ValueError("home: double-tapping AssistiveTouch changed nothing")

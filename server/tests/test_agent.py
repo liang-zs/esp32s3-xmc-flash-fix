@@ -306,11 +306,30 @@ def test_home_taps_assistivetouch_then_its_home_item():
     assert agent.phone.did == [("tap", 880, 770), ("tap", 570, 855)] and act["taps"] == [(880, 770), (570, 855)]
 
 
-def test_home_without_assistivetouch_falls_back_to_the_swipe():
+def test_home_without_a_button_fails_instead_of_swiping(tmp_path):
     import asyncio
+
+    import pytest
     agent = _home_agent({"button": "none", "home": "none"})
-    asyncio.run(agent._do({"action": "home"}))
-    assert agent.phone.did == [("swipe home",)]
+    agent.runs_file = tmp_path / "runs.jsonl"  # no remembered position yet
+    with pytest.raises(ValueError, match="no AssistiveTouch button"):
+        asyncio.run(agent._do({"action": "home"}))
+    assert agent.phone.did == []  # no bottom-edge swipe: with the keyboard up it typed "by"
+
+
+def test_home_uses_the_remembered_button_when_locating_fails(tmp_path, monkeypatch):
+    import asyncio
+
+    import hidagent.agent as agent_module
+    agent = _home_agent({"button": "750 945", "home": "none"})
+    agent.runs_file, agent.at_double_tap_home = tmp_path / "runs.jsonl", True
+    monkeypatch.setattr(agent_module.vision, "changed", lambda *a, **k: True)
+    asyncio.run(agent._do({"action": "home"}))  # found and worked: remembered
+    assert (tmp_path / "assistivetouch.json").exists()
+    lost = _home_agent({"button": "none", "home": "none"})
+    lost.runs_file, lost.at_double_tap_home = tmp_path / "runs.jsonl", True
+    asyncio.run(lost._do({"action": "home"}))  # over the keyboard: not found, the remembered spot is used
+    assert lost.phone.did == [("double", 750, 945)]
 
 
 def test_home_fails_when_the_menu_does_not_open():
