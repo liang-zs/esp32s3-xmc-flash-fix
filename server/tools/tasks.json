@@ -41,11 +41,6 @@
     "note": "scroll a long list; Chinese name -> English Settings row"
   },
   {
-    "id": "bilibili-search",
-    "task": "打开哔哩哔哩，搜索长安姑娘，打开第一个视频",
-    "note": "third-party app, Chinese input through pinyin"
-  },
-  {
     "id": "safari-url",
     "task": "打开 Safari，访问 apple.com/cn，告诉我页面上最大的标题是什么",
     "note": "address bar, typing a URL, page load"
@@ -54,5 +49,10 @@
     "id": "notes-chinese",
     "task": "打开备忘录，新建一条备忘录，输入测试笔记，然后回到主屏幕",
     "note": "creates a note each run (delete afterwards); pinyin inside a text editor"
+  },
+  {
+    "id": "bilibili-search",
+    "task": "打开哔哩哔哩，搜索长安姑娘，打开第一个视频",
+    "note": "third-party app, Chinese input through pinyin; last in the set: it ends with a video playing (it went full screen in landscape once)"
   }
 ]
