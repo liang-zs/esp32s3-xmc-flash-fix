@@ -57,7 +57,7 @@ iphone-agent/           给上游 legacy 分支用的补丁安装器（旧代，
 前置条件：iPhone 系统语言为英文；已开启 AssistiveTouch，「自定操作」设为**单点 = 打开菜单、轻点两下 = 主屏幕、长按 = 无**（长按别设锁屏：锁屏后 USB 挂起，agent 就动不了）；「全键盘控制」保持**关闭**（开着时空格被它当作「激活」，拼音候选无法用空格确认）；已添加「简体拼音」键盘；Mac 已装 [UxPlay](https://github.com/FDH2/UxPlay)；ESP32-S3 板已烧 HID 桥固件，并用下面两种方式之一连到 Mac：
 
 - **USB 串口（推荐，不依赖网络）**：板子的原生 USB 口接 iPhone，另一个 UART 口（USB 转串口芯片那个）接 Mac；`.env` 设 `DEVICE_SERIAL=auto`。需要 `serial-link` 分支或之后的固件。这样只剩 AirPlay 需要手机和 Mac 在同一网络（同一个 Wi-Fi 或同一个热点都行，但开了「客户端隔离」的公共网络不行）。
-- **Wi-Fi**：板子连上 `secrets.h` 里写的 Wi-Fi，主动连 `SERVER_HOST:7300`；换网络要改 `secrets.h` 重烧。
+- **Wi-Fi**：`secrets.h` 的 `WIFI_NETWORKS` 可写多个网络（家里 Wi-Fi、手机热点……，只支持 2.4 GHz），板子加入范围内排在最前的那个。Mac 每秒在局域网广播 `hidagent 7300`（UDP 7301），板子据此找到 Mac，不用写死 IP；换网络不用重烧。广播谁都能发，所以板子连上后会发一个随机数，服务器必须用共享密钥 `LINK_KEY`（`secrets.h` 和 `.env` 里同一个值）算出 HMAC 回答，否则板子挂断并一分钟内不理这个地址。没设 `LINK_KEY` 时不做发现，只连 `SERVER_HOST`。手机、Mac、板子三者要在同一个网络里，开了「客户端隔离」的公共网络不行。
 
 ```bash
 cd server
@@ -78,6 +78,7 @@ uv run --env-file .env python -m hidagent
 | --- | --- | --- |
 | `PORT` | `8890` | Web UI 端口 |
 | `DEVICE_PORT` | `7300` | ESP32 板反向连接的端口 |
+| `LINK_KEY` | — | 与固件 `secrets.h` 相同的随机串：开启 Wi-Fi 自动发现（UDP 7301 广播）并校验板子连的是这台 Mac |
 | `DEVICE_SERIAL` | — | 板子走 USB 串口：串口路径（如 `/dev/cu.usbserial-110`），或 `auto` 自动找（CP210x / CH34x / FTDI）；串口在线时板子不再连 Wi-Fi，服务器也拒绝 Wi-Fi 接入 |
 | `AIRPLAY_NAME` | `iPhone Agent` | 投屏列表里显示的名字 |
 | `LLM_BASE_URL` / `LLM_MODEL` / `LLM_API_KEY` | — | 任意 OpenAI 兼容视觉模型；`ACTOR_*` / `PLANNER_*` 可按角色覆盖 |
@@ -110,10 +111,11 @@ uv run --env-file .env python -m hidagent
 - **按画面内容判断「稳定」**：AirPlay 在手机静止时也持续以约 8 fps 推流，每帧带少量编码噪声，所以「一段时间没有新帧」永远不成立，每次动作后都要等满 4 秒，每轮找指针要等满 0.8 秒。现在每收到一帧就和上一帧比较（1/4 灰度图，≥8 个像素变化超过 20 才算真变化），`settled()` 看的是内容最后一次真正变化的时间。找指针的晃动太小，不足以算变化，所以那里保留固定的 0.55 秒等待。真机：每轮找指针从 2.0 秒降到 1.27 秒，回归任务从 151 秒降到 95 秒。
 - **板子连接可查**：`/api/status` 的 `board` 字段给出对方地址、固件问候、已连接时长、上次断线时间和原因，能区分「板子从没连上」和「连上后断了」；`link` 字段说明当前走 `serial` 还是 `wifi`。
 - **USB 串口链路**：和 Wi-Fi 同一套行协议，115200 波特率。打开串口可能让板子重启，ROM 启动日志会先到，服务器发 `hello` 直到收到 `hello <重启原因> <运行毫秒>` 才算连上，其余行一律跳过；会话中途收到 `hello` 说明板子重启过，`links` 加一，手势会重新归位。拔掉后每 2 秒重新找一次。串口在线时串口优先：板子停止拨 Wi-Fi，服务器关掉 Wi-Fi 接入。
+- **Wi-Fi 自动发现**：板子按 `WIFI_NETWORKS` 的顺序后台扫描、加入范围内的第一个网络（扫不到时轮流试，兼容隐藏网络）；Mac 在没有板子连着时每秒向每个网卡的定向广播地址和 255.255.255.255 发信标（macOS 的 255.255.255.255 只走一个网卡），每 10 秒重读一次网卡列表，切换网络后自动跟上。连上后的第一行必须是 `auth <HMAC-SHA256(LINK_KEY, 随机数)>`。
 
 ## 测试
 
-`server/tests/` 有 112 个测试，当前全部通过（agent 回复解析、恢复与计划进度、home/tapon/press、device 协议与超时、串口链路（pty 模拟板子：启动日志、中途重启、拔线、Wi-Fi 让位）、llm 的 token 参数与快速模式、vision 差分与指针识别、phone 闭环瞄准与双击、状态机升级、App 名映射、回归判定）。
+`server/tests/` 有 117 个测试，当前全部通过（agent 回复解析、恢复与计划进度、home/tapon/press、device 协议与超时、串口链路（pty 模拟板子：启动日志、中途重启、拔线、Wi-Fi 让位）、Wi-Fi 发现与密钥校验、llm 的 token 参数与快速模式、vision 差分与指针识别、phone 闭环瞄准与双击、状态机升级、App 名映射、回归判定）。
 
 真机回归（会占用手机几分钟到二十几分钟）：
 

@@ -3,8 +3,13 @@ USB serial port. Same line protocol either way."""
 
 import asyncio
 import glob
+import hashlib
+import hmac
 import logging
 import os
+import re
+import socket
+import subprocess
 import termios
 import time
 import tty
@@ -15,6 +20,19 @@ BAUD = 115200
 # USB-UART chips on ESP32-S3 boards: CP210x, CH34x (Apple's driver or WCH's), FTDI
 SERIAL_GLOBS = ["/dev/cu.usbserial*", "/dev/cu.wchusbserial*", "/dev/cu.SLAB_USBtoUART*", "/dev/cu.usbmodem*"]
 PROBE_S = 3.0  # opening the port may reset the board: boot log, then "hello", well within this
+DISCOVERY_PORT = 7301  # the board listens here for "hidagent <tcp port>" beacons
+
+
+def broadcast_addrs(ifconfig: str) -> list[str]:
+    """Directed broadcast address of every IPv4 interface (`ifconfig` output), plus the limited broadcast.
+    macOS sends 255.255.255.255 out of one interface only, so each network gets its own as well."""
+    found = re.findall(r"inet (?!127\.)\S+ netmask \S+ broadcast (\S+)", ifconfig)
+    return list(dict.fromkeys(found + ["255.255.255.255"]))
+
+
+def link_auth(key: str, nonce: str) -> str:
+    """The answer the board expects to its hello nonce: hex HMAC-SHA256(key, nonce)."""
+    return hmac.new(key.encode(), nonce.encode(), hashlib.sha256).hexdigest()
 
 
 class DeviceError(RuntimeError):
@@ -96,7 +114,8 @@ def serial_candidates(spec: str) -> list[str]:
 class Device:
     """Accepts one board connection and sends it commands, one at a time."""
 
-    def __init__(self):
+    def __init__(self, key: str = ""):
+        self.key = key  # LINK_KEY: shared with the firmware, answers the board's hello nonce
         self._reader = self._writer = None
         self._lock = asyncio.Lock()
         self._last = self._beat = 0.0
@@ -122,8 +141,52 @@ class Device:
             hello = (await asyncio.wait_for(reader.readline(), 1)).decode().strip()
         except (OSError, asyncio.TimeoutError):
             hello = ""
+        if not await self._auth(reader, writer, hello):
+            writer.close()
+            return
         peer = writer.get_extra_info("peername")
         self._attach(reader, writer, hello, f"{peer[0]}:{peer[1]}" if peer else "", serial=False)
+
+    async def _auth(self, reader, writer, hello: str) -> bool:
+        """A board with LINK_KEY ends its hello with a nonce; prove we know the key before anything else."""
+        words = hello.split()
+        if len(words) < 4 or words[0] != "hello":
+            return True  # no nonce: the board does not ask
+        if not self.key:
+            log.warning("board asks for link auth but LINK_KEY is not set; turning it away")
+            return False
+        try:
+            writer.write(f"auth {link_auth(self.key, words[3])}\n".encode())
+            await writer.drain()
+            reply = (await asyncio.wait_for(reader.readline(), 3)).decode(errors="replace").strip()
+        except (OSError, asyncio.TimeoutError) as e:
+            reply = repr(e)
+        if reply != "ok":
+            log.warning("board refused our link auth (%s): LINK_KEY differs from the firmware's", reply)
+            return False
+        return True
+
+    async def beacon(self, tcp_port: int, every: float = 1.0, port: int = DISCOVERY_PORT, addrs=None) -> None:
+        """While no board is linked, tell the network where to dial: "hidagent <tcp port>" to every broadcast
+        address. The board then needs no IP written in, so it works on any network it can join."""
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        sock.setblocking(False)
+        message, targets, refreshed = f"hidagent {tcp_port}".encode(), [], 0.0
+        try:
+            while True:
+                if not self.connected:
+                    if time.time() - refreshed > 10:  # networks come and go (Wi-Fi switch, hotspot)
+                        targets = addrs() if addrs else await asyncio.to_thread(_local_broadcasts)
+                        refreshed = time.time()
+                    for addr in targets:
+                        try:
+                            sock.sendto(message, (addr, port))
+                        except OSError:
+                            pass  # that network just went away
+                await asyncio.sleep(every)
+        finally:
+            sock.close()
 
     def _attach(self, reader, writer, hello: str, peer: str, serial: bool) -> None:
         if self.connected:
@@ -266,3 +329,11 @@ class Device:
                     await self.send("ping")
             except DeviceError as e:
                 log.info("board gone: %s", e)
+
+
+def _local_broadcasts() -> list[str]:
+    try:
+        out = subprocess.run(["ifconfig"], capture_output=True, text=True, timeout=5).stdout
+    except (OSError, subprocess.SubprocessError):
+        out = ""
+    return broadcast_addrs(out)

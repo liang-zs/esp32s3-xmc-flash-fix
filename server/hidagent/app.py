@@ -22,7 +22,7 @@ DATA_DIR = Path(os.environ.get("HIDAGENT_DATA", Path.home() / ".hidagent"))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 DEBUG = os.environ.get("HIDAGENT_DEBUG") == "1"
 
-device = Device()
+device = Device(key=os.environ.get("LINK_KEY", ""))
 screen = Screen(os.environ.get("AIRPLAY_NAME", "iPhone Agent"))
 phone = Phone(device, DATA_DIR / "calibration.json", screen)
 agent = Agent(phone, screen, LLM.from_env("ACTOR"), LLM.from_env("PLANNER"),
@@ -36,7 +36,10 @@ agent = Agent(phone, screen, LLM.from_env("ACTOR"), LLM.from_env("PLANNER"),
 
 @asynccontextmanager
 async def lifespan(_):
-    server = await device.serve("0.0.0.0", int(os.environ.get("DEVICE_PORT", 7300)))
+    tcp_port = int(os.environ.get("DEVICE_PORT", 7300))
+    server = await device.serve("0.0.0.0", tcp_port)
+    # without LINK_KEY the board does not trust beacons (anyone can send one), so there is nothing to announce
+    found = asyncio.create_task(device.beacon(tcp_port)) if device.key else None
     screen.start()
     awake = asyncio.create_task(device.keep_awake(screen=screen))
     # board on a USB serial port (a path, or "auto"): no network needed between the Mac and the board
@@ -46,6 +49,8 @@ async def lifespan(_):
     awake.cancel()
     if cable:
         cable.cancel()
+    if found:
+        found.cancel()
     device.close()
     screen.stop()
     server.close()

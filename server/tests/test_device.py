@@ -192,3 +192,104 @@ def test_serial_candidates(monkeypatch):
     assert d.serial_candidates("/dev/does-not-exist") == []
     monkeypatch.setattr(d.glob, "glob", lambda g: ["/dev/cu.usbserial-10"] if "usbserial" in g else [])
     assert d.serial_candidates("auto") == ["/dev/cu.usbserial-10"]
+
+
+IFCONFIG = """lo0: flags=8049<UP,LOOPBACK,RUNNING,MULTICAST> mtu 16384
+	inet 127.0.0.1 netmask 0xff000000
+en0: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1500
+	inet 192.168.0.4 netmask 0xffffff00 broadcast 192.168.0.255
+en7: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1500
+	inet 172.20.10.2 netmask 0xfffffff0 broadcast 172.20.10.15
+"""
+
+
+def test_broadcast_addresses_cover_every_network():
+    from hidagent.device import broadcast_addrs
+    assert broadcast_addrs(IFCONFIG) == ["192.168.0.255", "172.20.10.15", "255.255.255.255"]
+    assert broadcast_addrs("") == ["255.255.255.255"]
+
+
+async def _dial(port: int, hello: bytes):
+    reader, writer = await asyncio.open_connection("127.0.0.1", port)
+    writer.write(hello)
+    await writer.drain()
+    return reader, writer
+
+
+def test_board_with_a_nonce_is_linked_once_the_server_proves_the_key():
+    from hidagent.device import link_auth
+
+    async def scenario():
+        device = Device(key="k3y")
+        server = await device.serve("127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        reader, writer = await _dial(port, b"hello power-on 99 abc123\n")
+        line = (await asyncio.wait_for(reader.readline(), 2)).decode().strip()
+        assert line == "auth " + link_auth("k3y", "abc123")
+        writer.write(b"ok\n")
+        await writer.drain()
+        assert await device.wait_connected(2)
+        assert device.hello == "hello power-on 99 abc123"
+        writer.close()
+        server.close()
+
+    asyncio.run(scenario())
+
+
+def test_board_that_refuses_our_auth_is_not_linked():
+    async def scenario():
+        device = Device(key="wrong")
+        server = await device.serve("127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        reader, writer = await _dial(port, b"hello power-on 99 abc123\n")
+        await asyncio.wait_for(reader.readline(), 2)  # our auth line
+        writer.write(b"err auth\n")
+        await writer.drain()
+        assert not await device.wait_connected(0.5)
+        writer.close()
+        server.close()
+
+    asyncio.run(scenario())
+
+
+def test_board_asking_for_auth_without_a_key_here_is_turned_away():
+    async def scenario():
+        device = Device()
+        server = await device.serve("127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        reader, writer = await _dial(port, b"hello power-on 99 abc123\n")
+        try:
+            assert await asyncio.wait_for(reader.read(), 2) == b""  # hung up without an auth line
+        except ConnectionResetError:
+            pass
+        assert not device.connected
+        writer.close()
+        server.close()
+
+    asyncio.run(scenario())
+
+
+def test_beacon_announces_the_tcp_port_until_a_board_links():
+    async def scenario():
+        got = asyncio.Queue()
+
+        class Listener(asyncio.DatagramProtocol):
+            def datagram_received(self, data, addr):
+                got.put_nowait(data)
+
+        loop = asyncio.get_running_loop()
+        transport, _ = await loop.create_datagram_endpoint(Listener, local_addr=("127.0.0.1", 0))
+        port = transport.get_extra_info("sockname")[1]
+        device = Device(key="k")
+        task = asyncio.create_task(device.beacon(7300, every=0.05, port=port, addrs=lambda: ["127.0.0.1"]))
+        assert await asyncio.wait_for(got.get(), 2) == b"hidagent 7300"
+        device._writer = type("W", (), {"is_closing": lambda self: False})()  # a board is linked now
+        await asyncio.sleep(0.15)
+        while not got.empty():
+            got.get_nowait()
+        await asyncio.sleep(0.2)
+        assert got.empty()  # quiet while linked
+        task.cancel()
+        transport.close()
+
+    asyncio.run(scenario())
