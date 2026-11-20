@@ -131,7 +131,10 @@ class HomeMixin:
         spot = (button[0] / 1000, button[1] / 1000)
         for attempt in range(2):
             before = self.screen.frame
-            await self.phone.double_tap(*spot, aim=True)
+            # aim the first time only: nothing moves the pointer off the button in between, and each aim costs
+            # ~1.3 s. Coming home from an app opened via App Library search takes two (iOS first goes back to
+            # that search screen; settings-chain, 2026-11-21, twice per run).
+            await self.phone.double_tap(*spot, aim=attempt == 0)
             await self.screen.settled(quiet=0.3, least=0.8, most=2.0)  # iOS waits out the double-tap timeout
             # both questions at once: did the menu open (taken as a single tap), or is this the Home Screen
             item, home = await asyncio.gather(self._locate(AT_HOME_Q), self._is_home_screen())

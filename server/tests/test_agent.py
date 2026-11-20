@@ -292,7 +292,7 @@ def _home_agent(answers):
 
     class Phone:
         def __init__(self):
-            self.did, self.moves = [], []
+            self.did, self.moves, self.aims = [], [], []
         async def tap(self, x, y, aim=False):
             self.did.append(("tap", round(x * 1000), round(y * 1000)))
         async def go_home(self):
@@ -301,6 +301,7 @@ def _home_agent(answers):
             self.moves.append((round(x * 1000), round(y * 1000)))
         async def double_tap(self, x, y, aim=False):
             self.did.append(("double", round(x * 1000), round(y * 1000)))
+            self.aims.append(aim)
 
     return Agent(phone=Phone(), screen=Screen(), actor=Actor(), planner=None, trace=Trace(None))
 
@@ -429,6 +430,7 @@ def test_home_by_double_tap_tries_twice_then_fails(monkeypatch):
     with pytest.raises(ValueError, match="changed nothing"):
         asyncio.run(agent._do({"action": "home"}))
     assert agent.phone.did == [("double", 750, 945), ("double", 750, 945)]
+    assert agent.phone.aims == [True, False]  # the pointer is still on the button the second time
 
 
 def test_the_pointer_is_parked_in_the_middle_and_an_answer_there_is_the_pointer():
