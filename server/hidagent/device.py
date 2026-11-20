@@ -2,6 +2,7 @@
 USB serial port. Same line protocol either way."""
 
 import asyncio
+import fcntl
 import glob
 import hashlib
 import hmac
@@ -20,6 +21,7 @@ BAUD = 115200
 # USB-UART chips on ESP32-S3 boards: CP210x, CH34x (Apple's driver or WCH's), FTDI
 SERIAL_GLOBS = ["/dev/cu.usbserial*", "/dev/cu.wchusbserial*", "/dev/cu.SLAB_USBtoUART*", "/dev/cu.usbmodem*"]
 PROBE_S = 3.0  # opening the port may reset the board: boot log, then "hello", well within this
+QUIET_PORT_S = 300.0  # a port where no board answered is left alone this long (it may be esptool's, mid-flash)
 DISCOVERY_PORT = 7301  # the board listens here for "hidagent <tcp port>" beacons
 
 
@@ -46,6 +48,7 @@ class SerialLink:
         self.path = path
         fd = os.open(path, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
         try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)  # in use (esptool, a serial monitor): hands off
             tty.setraw(fd)
             attrs = termios.tcgetattr(fd)
             attrs[2] = (attrs[2] | termios.CLOCAL | termios.CREAD) & ~termios.HUPCL  # closing must not reset it
@@ -199,12 +202,19 @@ class Device:
         log.info("board connected over %s %s %s", "serial" if serial else "wifi", peer, hello)
 
     async def serial_loop(self, spec: str, every: float = 2.0) -> None:
-        """Keep a board on a USB serial port linked: find it, and find it again after a replug."""
+        """Keep a board on a USB serial port linked: find it, and find it again after a replug. A port where no
+        board answered is not probed again for a while: probing writes to it, which breaks a flash in progress."""
+        quiet: dict[str, float] = {}
         while True:
             if not (self.connected and self.serial):
+                now = time.time()
                 for path in serial_candidates(spec):
+                    if quiet.get(path, 0) > now:
+                        continue
                     if await self._probe(path):
+                        quiet.pop(path, None)
                         break
+                    quiet[path] = now + QUIET_PORT_S
             await asyncio.sleep(every)
 
     async def _probe(self, path: str) -> bool:

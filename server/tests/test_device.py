@@ -293,3 +293,46 @@ def test_beacon_announces_the_tcp_port_until_a_board_links():
         transport.close()
 
     asyncio.run(scenario())
+
+
+def test_serial_loop_leaves_a_silent_port_alone(monkeypatch):
+    from hidagent import device as d
+
+    async def scenario():
+        device = Device()
+        probed = []
+
+        async def probe(path):
+            probed.append(path)
+            return False
+
+        monkeypatch.setattr(device, "_probe", probe)
+        monkeypatch.setattr(d, "serial_candidates", lambda spec: ["/dev/cu.usbmodem1"])
+        task = asyncio.create_task(device.serial_loop("auto", every=0.01))
+        await asyncio.sleep(0.1)
+        task.cancel()
+        assert probed == ["/dev/cu.usbmodem1"]  # once, then quiet for QUIET_PORT_S
+
+    asyncio.run(scenario())
+
+
+def test_a_port_held_by_another_program_is_not_opened():
+    import fcntl
+    import os
+
+    from hidagent.device import SerialLink
+
+    async def scenario():
+        master, slave = os.openpty()
+        path = os.ttyname(slave)
+        holder = os.open(path, os.O_RDWR | os.O_NOCTTY)
+        fcntl.flock(holder, fcntl.LOCK_EX | fcntl.LOCK_NB)  # like esptool's exclusive open
+        with pytest.raises(OSError):
+            SerialLink(path)
+        os.close(holder)
+        link = SerialLink(path)  # free again
+        link.close()
+        os.close(master)
+        os.close(slave)
+
+    asyncio.run(scenario())
