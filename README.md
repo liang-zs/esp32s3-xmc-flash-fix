@@ -8,7 +8,7 @@
  iPhone ──AirPlay 镜像──▶ Mac (UxPlay) ──JPEG 帧──▶ Agent (FastAPI)
     ▲                                                     │
     │ USB HID（鼠标/键盘）                                 │ 截图 + 任务
-    └──────── ESP32-S3 板 ◀──Wi-Fi TCP 7300───────────────┘
+    └──────── ESP32-S3 板 ◀──USB 串口，或 Wi-Fi TCP 7300──┘
                                                           │
                                         DeepSeek / 任意 OpenAI 兼容视觉模型
 ```
@@ -54,7 +54,10 @@ iphone-agent/           给上游 legacy 分支用的补丁安装器（旧代，
 
 ## 快速开始
 
-前置条件：iPhone 系统语言为英文；已开启 AssistiveTouch，「自定操作」设为**单点 = 打开菜单、轻点两下 = 主屏幕、长按 = 无**（长按别设锁屏：锁屏后 USB 挂起，agent 就动不了）；「全键盘控制」保持**关闭**（开着时空格被它当作「激活」，拼音候选无法用空格确认）；已添加「简体拼音」键盘；Mac 已装 [UxPlay](https://github.com/FDH2/UxPlay)；ESP32-S3 板已烧 HID 桥固件并连上同一 Wi-Fi。
+前置条件：iPhone 系统语言为英文；已开启 AssistiveTouch，「自定操作」设为**单点 = 打开菜单、轻点两下 = 主屏幕、长按 = 无**（长按别设锁屏：锁屏后 USB 挂起，agent 就动不了）；「全键盘控制」保持**关闭**（开着时空格被它当作「激活」，拼音候选无法用空格确认）；已添加「简体拼音」键盘；Mac 已装 [UxPlay](https://github.com/FDH2/UxPlay)；ESP32-S3 板已烧 HID 桥固件，并用下面两种方式之一连到 Mac：
+
+- **USB 串口（推荐，不依赖网络）**：板子的原生 USB 口接 iPhone，另一个 UART 口（USB 转串口芯片那个）接 Mac；`.env` 设 `DEVICE_SERIAL=auto`。需要 `serial-link` 分支或之后的固件。这样只剩 AirPlay 需要手机和 Mac 在同一网络（同一个 Wi-Fi 或同一个热点都行，但开了「客户端隔离」的公共网络不行）。
+- **Wi-Fi**：板子连上 `secrets.h` 里写的 Wi-Fi，主动连 `SERVER_HOST:7300`；换网络要改 `secrets.h` 重烧。
 
 ```bash
 cd server
@@ -75,6 +78,7 @@ uv run --env-file .env python -m hidagent
 | --- | --- | --- |
 | `PORT` | `8890` | Web UI 端口 |
 | `DEVICE_PORT` | `7300` | ESP32 板反向连接的端口 |
+| `DEVICE_SERIAL` | — | 板子走 USB 串口：串口路径（如 `/dev/cu.usbserial-110`），或 `auto` 自动找（CP210x / CH34x / FTDI）；串口在线时板子不再连 Wi-Fi，服务器也拒绝 Wi-Fi 接入 |
 | `AIRPLAY_NAME` | `iPhone Agent` | 投屏列表里显示的名字 |
 | `LLM_BASE_URL` / `LLM_MODEL` / `LLM_API_KEY` | — | 任意 OpenAI 兼容视觉模型；`ACTOR_*` / `PLANNER_*` 可按角色覆盖 |
 | `ACTOR_FAST_BODY` | — | 常规步骤不推理（DeepSeek：`{"thinking": {"type": "disabled"}}`）；删掉即一直推理 |
@@ -104,11 +108,12 @@ uv run --env-file .env python -m hidagent
 - **执行模型的快速模式**：设置 `ACTOR_FAST_BODY`（DeepSeek：`{"thinking": {"type": "disabled"}}`）后，常规步骤不推理直接回答（每次约 1.2 秒，推理约 3.3 秒）。以下情况仍会推理：上一步画面没变化（`missed`）、回复被拒（`rejected`）或重复了无效动作（`repeated`）、同一计划步骤超过 3 轮（`stuck`）。`runs.jsonl` 每行记录 `fast_calls` 和 `think_<原因>` 的次数与秒数，`GET /api/runs` 的 `think` 字段汇总。删掉这个变量即恢复为一直推理。离线对比：`uv run --env-file .env python tools/replay_actor.py ~/.hidagent/traces/<运行>`。iPhone 11 回归任务 8/8 成功，平均 93 秒（之前 123 秒）。
 - **每次运行有统计**：结束时向 `~/.hidagent/runs.jsonl` 写一行（结果、用时、动作数、重规划次数、LLM 调用次数和 tokens、费用，以及时间去向：`llm_s` 思考、`act_s` 执行动作含定位与瞄准、`locate_s` 定位、`settle_s` 等画面稳定），`GET /api/runs` 汇总成功率、平均用时、平均 tokens。最近几次运行里执行动作占 40–60%，思考 16–32%：每次闭环瞄准约 1.3 秒，所以 `press` 只瞄准第一个键。在 `.env` 里设置 `LLM_PRICE`（高峰价）后才计算费用；再设 `LLM_PRICE_IDLE` 就按北京时间区分高峰（工作日 9–12、14–18 点，可用 `LLM_PEAK_HOURS` 改）和空闲时段，按任务开始时间计价。
 - **按画面内容判断「稳定」**：AirPlay 在手机静止时也持续以约 8 fps 推流，每帧带少量编码噪声，所以「一段时间没有新帧」永远不成立，每次动作后都要等满 4 秒，每轮找指针要等满 0.8 秒。现在每收到一帧就和上一帧比较（1/4 灰度图，≥8 个像素变化超过 20 才算真变化），`settled()` 看的是内容最后一次真正变化的时间。找指针的晃动太小，不足以算变化，所以那里保留固定的 0.55 秒等待。真机：每轮找指针从 2.0 秒降到 1.27 秒，回归任务从 151 秒降到 95 秒。
-- **板子连接可查**：`/api/status` 的 `board` 字段给出对方地址、固件问候、已连接时长、上次断线时间和原因，能区分「板子从没连上」和「连上后断了」。
+- **板子连接可查**：`/api/status` 的 `board` 字段给出对方地址、固件问候、已连接时长、上次断线时间和原因，能区分「板子从没连上」和「连上后断了」；`link` 字段说明当前走 `serial` 还是 `wifi`。
+- **USB 串口链路**：和 Wi-Fi 同一套行协议，115200 波特率。打开串口可能让板子重启，ROM 启动日志会先到，服务器发 `hello` 直到收到 `hello <重启原因> <运行毫秒>` 才算连上，其余行一律跳过；会话中途收到 `hello` 说明板子重启过，`links` 加一，手势会重新归位。拔掉后每 2 秒重新找一次。串口在线时串口优先：板子停止拨 Wi-Fi，服务器关掉 Wi-Fi 接入。
 
 ## 测试
 
-`server/tests/` 有 106 个测试，当前全部通过（agent 回复解析、恢复与计划进度、home/tapon/press、device 协议与超时、llm 的 token 参数与快速模式、vision 差分与指针识别、phone 闭环瞄准与双击、状态机升级、App 名映射、回归判定）。
+`server/tests/` 有 112 个测试，当前全部通过（agent 回复解析、恢复与计划进度、home/tapon/press、device 协议与超时、串口链路（pty 模拟板子：启动日志、中途重启、拔线、Wi-Fi 让位）、llm 的 token 参数与快速模式、vision 差分与指针识别、phone 闭环瞄准与双击、状态机升级、App 名映射、回归判定）。
 
 真机回归（会占用手机几分钟到二十几分钟）：
 

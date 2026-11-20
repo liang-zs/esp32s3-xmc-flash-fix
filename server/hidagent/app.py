@@ -39,8 +39,14 @@ async def lifespan(_):
     server = await device.serve("0.0.0.0", int(os.environ.get("DEVICE_PORT", 7300)))
     screen.start()
     awake = asyncio.create_task(device.keep_awake(screen=screen))
+    # board on a USB serial port (a path, or "auto"): no network needed between the Mac and the board
+    serial = os.environ.get("DEVICE_SERIAL")
+    cable = asyncio.create_task(device.serial_loop(serial)) if serial else None
     yield
     awake.cancel()
+    if cable:
+        cable.cancel()
+    device.close()
     screen.stop()
     server.close()
 
