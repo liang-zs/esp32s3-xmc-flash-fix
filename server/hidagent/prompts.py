@@ -209,3 +209,8 @@ GOAL_CHECK = ("First look at the screenshot: if it shows the goal reached by the
               "Something already on screen when an app opened is left over from before and does not count.\n")
 GRID_NOTE = ("\n\nThe screenshot has thin cyan grid lines every 100 units of the 0-1000 scale, labeled in "
              "yellow along the top and left edges. Read tap positions off them. They are not part of the screen.")
+# after a tapon / press that found nothing (see errors.NotFound): look again instead of a new plan
+NOT_FOUND_NOTE = ("\n\nYour last tapon/press found nothing by that name on this screen (see the hiccup above). Look "
+                  "at the screenshot again: name the control by the exact text it shows; an icon without text (a "
+                  "pen, a pencil on a square, a plus, an arrow) is tapped by its coordinates; if it is not on screen "
+                  "yet, scroll or wait. Do not repeat the same tapon.")

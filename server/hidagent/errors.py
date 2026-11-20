@@ -18,3 +18,10 @@ class LandscapeError(BlindError):
     and every coordinate assume portrait; iPhone 11, 2026-11-19: a bilibili video went full screen in landscape,
     the AssistiveTouch button was hidden and two tasks double-tapped the video (likely 'liking' it) until they
     failed. Stop and ask for portrait instead."""
+
+
+class NotFound(ValueError):
+    """tapon / press found nothing by that name on the screen. Mild: the actor is told and looks again (another
+    label, coordinates for an icon without text, scroll or wait) instead of a whole new plan. 2026-11-18..21: all 23
+    not-found tapons led to a replan; offline, a looser second question found three toolbar icons but also pointed
+    at the AssistiveTouch button and a Safari suggestion for absent things, so the locator itself stays strict."""

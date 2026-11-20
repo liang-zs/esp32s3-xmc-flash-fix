@@ -13,13 +13,21 @@ from .apps import app_hints
 from .commands import _key, _pointer_path, circle, parse_actions, parse_plan, plan_steps
 from .debug import Trace
 from .device import DeviceError
-from .errors import BlindError, GiveUp, LandscapeError
+from .errors import BlindError, GiveUp, LandscapeError, NotFound
 from .home import AT_AVOID, HomeMixin
 from .keyboard import KeyboardMixin
 from .llm import LLM, cost
 from .locate import LocateMixin
 from .phone import Phone
-from .prompts import ACTOR_PROMPT, GOAL_CHECK, GRID_NOTE, LANDSCAPE_DONE_PROMPT, LANDSCAPE_DONE_Q, PLANNER_PROMPT
+from .prompts import (
+    ACTOR_PROMPT,
+    GOAL_CHECK,
+    GRID_NOTE,
+    LANDSCAPE_DONE_PROMPT,
+    LANDSCAPE_DONE_Q,
+    NOT_FOUND_NOTE,
+    PLANNER_PROMPT,
+)
 from .screen import Screen
 from .task_state import Recovery, TaskContext, TaskState
 
@@ -262,7 +270,8 @@ class Agent(LocateMixin, HomeMixin, KeyboardMixin):
                     except (BlindError, GiveUp):
                         raise
                     except Exception as e:  # a bad reply or a dropped link: recover, don't crash
-                        self._record(action="hiccup", reason=str(e)[:300])
+                        self._record(action="hiccup", reason=str(e)[:300], **({"not_found": True}
+                                                                              if isinstance(e, NotFound) else {}))
                         if isinstance(e, DeviceError) and USB_ASLEEP in str(e):
                             asleep += 1
                             if asleep >= USB_ASLEEP_STOP:
@@ -270,6 +279,11 @@ class Agent(LocateMixin, HomeMixin, KeyboardMixin):
                             await self.screen.settled()
                             continue  # the board link is up; the USB side may wake on the next try
                         asleep = 0
+                        if isinstance(e, NotFound) and not self._not_found_before():
+                            failures += 1  # still counts: three errors in a row end the task as before
+                            if failures >= self.max_failures:
+                                raise GiveUp(f"{failures} errors in a row") from e
+                            continue  # the actor sees it in the history and looks again (see _think_reason)
                         board_drop = isinstance(e, DeviceError) and await self.phone.device.wait_connected(15)
                         failures += 0 if board_drop else 1  # the board came back: not the agent's fault
                         if failures >= self.max_failures:
@@ -434,6 +448,14 @@ class Agent(LocateMixin, HomeMixin, KeyboardMixin):
             await self._replan(stuck=True)
         return recovery
 
+    def _not_found(self) -> bool:
+        """The previous step was a tapon or press that found nothing by that name."""
+        return bool(self.steps) and self.steps[-1].get("not_found", False)
+
+    def _not_found_before(self) -> bool:
+        """The step before the one just recorded was a not-found too: two in a row, so plan again."""
+        return len(self.steps) >= 2 and self.steps[-2].get("not_found", False)
+
     def _missed(self) -> bool:
         """The previous round changed nothing on screen, so a tap may have landed off target."""
         return bool(self.steps) and self.steps[-1].get("changed") is False
@@ -507,6 +529,8 @@ class Agent(LocateMixin, HomeMixin, KeyboardMixin):
         screen moved on, which the stall budget reads as being stuck)."""
         if retry:
             return retry
+        if self._not_found():
+            return "not_found"
         if self._missed():
             return "missed"
         if self.task_ctx.rounds_on_step >= FAST_ROUNDS:
@@ -526,6 +550,8 @@ class Agent(LocateMixin, HomeMixin, KeyboardMixin):
         prompt = (f"{goal}\n\n{self._progress()}\n\nRecent actions:\n{history}\n\n"
                   f"{GOAL_CHECK}Next action? Start with DONE: yes or no (is the [now] step finished on this "
                   "screen?).")
+        if self._not_found():
+            prompt += NOT_FOUND_NOTE
         retry = ""  # why the previous reply in this round was refused
         for attempt in range(3):  # retry unparseable replies, a little less deterministically
             # routine step: answer fast; think it through when there is a reason to look harder
@@ -609,7 +635,7 @@ class Agent(LocateMixin, HomeMixin, KeyboardMixin):
             case "tapon":
                 spot = await self._locate(f"Where is the center of the {a['what']}?", by_text=True)
                 if spot is None:
-                    raise ValueError(f"tapon: could not find {a['what']!r} on screen")
+                    raise NotFound(f"tapon: could not find {a['what']!r} on screen")
                 a["taps"] = [spot]
                 await self.phone.tap(spot[0] / 1000, spot[1] / 1000, aim=True)
             case "back": await self.phone.go_back()

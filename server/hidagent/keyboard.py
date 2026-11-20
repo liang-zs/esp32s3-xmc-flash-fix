@@ -5,6 +5,7 @@ import logging
 import time
 
 from . import vision
+from .errors import NotFound
 from .locate import last_line
 from .prompts import KEYBOARD_Q, ONE_WORD_PROMPT
 
@@ -88,7 +89,7 @@ class KeyboardMixin:
                                        for k in distinct))
         missing = [k for k, p in zip(distinct, spots, strict=True) if p is None]
         if missing:
-            raise ValueError(f"could not find key(s) {' '.join(missing)} on screen")
+            raise NotFound(f"press: could not find key(s) {' '.join(missing)} on screen")
         found = dict(zip(distinct, spots, strict=True))
         log.info("[PRESS] %s", {k: found[k] for k in labels})
         return [found[k] for k in labels]

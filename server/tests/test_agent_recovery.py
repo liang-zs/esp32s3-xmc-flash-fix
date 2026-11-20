@@ -389,3 +389,58 @@ def test_landscape_before_the_goal_still_fails(monkeypatch):
 
     asyncio.run(run())
     assert agent.steps[-1]["action"] == "fail" and "landscape" in agent.steps[-1]["reason"]
+
+
+class ScriptedActor:
+    """Actor that answers from a script; every locate question gets 'none' (nothing by that name on screen)."""
+    model = "fake"
+
+    def __init__(self, replies):
+        self.replies, self.prompts = list(replies), []
+
+    async def chat(self, system, text, image=None, max_tokens=600, temperature=0, fast=False):
+        if system.startswith("You locate"):
+            return "none"
+        self.prompts.append((text, fast))
+        return self.replies.pop(0)
+
+
+def _not_found_run(monkeypatch, replies):
+    from hidagent import agent as agent_module
+
+    monkeypatch.setattr(agent_module.vision, "changed", lambda *a, **k: True)
+
+    class Phone:
+        async def tap(self, x, y, aim=False):
+            return None
+
+    class QuietScreen(Screen):
+        async def settled(self, **kw):
+            return None
+
+    planner, actor = PromptPlanLLM(), ScriptedActor(replies)
+    agent = Agent(phone=Phone(), screen=QuietScreen(), actor=actor, planner=planner, trace=Trace(), max_steps=10)
+
+    async def run():
+        agent.start("画一个圆")
+        await agent._job
+
+    asyncio.run(run())
+    return agent, actor, planner
+
+
+def test_a_tapon_that_finds_nothing_goes_back_to_the_actor_not_the_planner(monkeypatch):
+    from hidagent.prompts import NOT_FOUND_NOTE
+    agent, actor, planner = _not_found_run(monkeypatch, ["DO: tapon pen tool icon", "DO: tap 70 935", "DO: done ok"])
+    assert len(planner.prompts) == 1  # the first plan only
+    text, _ = actor.prompts[1]
+    assert NOT_FOUND_NOTE in text and agent.usage.get("think_not_found") == 1  # told why, and thinks this round
+    assert NOT_FOUND_NOTE not in actor.prompts[2][0]
+    assert [s["action"] for s in agent.steps if s["action"] not in ("plan",)] == ["hiccup", "tap", "done"]
+
+
+def test_two_not_found_in_a_row_plan_again(monkeypatch):
+    agent, actor, planner = _not_found_run(monkeypatch, ["DO: tapon pen tool icon", "DO: tapon pen icon",
+                                                         "DO: done ok"])
+    assert len(planner.prompts) == 2 and "could not find 'pen icon'" in planner.prompts[1]
+    assert agent.steps[-1]["action"] == "done"
