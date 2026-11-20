@@ -335,8 +335,11 @@ def test_taps_away_from_the_button_pass(tmp_path):
     assert agent._on_at_button([{"action": "tapon", "what": "Done"}]) is None
 
 
-def _landscape_agent(verdict: str):
-    """The phone turns landscape after the first tap (a video went full screen); the model judges the goal."""
+def _landscape_agent(verdict):
+    """The phone turns landscape after the first tap (a video went full screen); the model judges the goal
+    (`verdict`: one answer, or a list answered in turn)."""
+    verdicts = [verdict] if isinstance(verdict, str) else list(verdict)
+    asked = []
     class Phone:
         async def tap(self, x, y, aim=False):
             screen.landscape = True
@@ -356,17 +359,21 @@ def _landscape_agent(verdict: str):
 
         async def chat(self, system, text, image=None, max_tokens=600, temperature=0, fast=False):
             if "landscape screen now" in system:
-                return verdict
+                asked.append(text)
+                return verdicts.pop(0) if len(verdicts) > 1 else verdicts[0]
             return "THINK: open the first video\nDO: tap 300 200"
 
     screen = TurningScreen()
-    return Agent(phone=Phone(), screen=screen, actor=Actor(), planner=PlanLLM(), trace=Trace())
+    agent = Agent(phone=Phone(), screen=screen, actor=Actor(), planner=PlanLLM(), trace=Trace())
+    agent.landscape_asked = asked
+    return agent
 
 
 def test_landscape_after_the_goal_is_reached_counts_as_done(monkeypatch):
     from hidagent import agent as agent_module
 
     monkeypatch.setattr(agent_module.vision, "changed", lambda *a, **k: True)
+    monkeypatch.setattr(agent_module, "LANDSCAPE_SETTLE", 0)
     agent = _landscape_agent("长安姑娘的第一个视频正在全屏播放\nyes")
 
     async def run():
@@ -381,6 +388,7 @@ def test_landscape_before_the_goal_still_fails(monkeypatch):
     from hidagent import agent as agent_module
 
     monkeypatch.setattr(agent_module.vision, "changed", lambda *a, **k: True)
+    monkeypatch.setattr(agent_module, "LANDSCAPE_SETTLE", 0)
     agent = _landscape_agent("A bilibili ad is playing\nno")
 
     async def run():
@@ -389,6 +397,7 @@ def test_landscape_before_the_goal_still_fails(monkeypatch):
 
     asyncio.run(run())
     assert agent.steps[-1]["action"] == "fail" and "landscape" in agent.steps[-1]["reason"]
+    assert len(agent.landscape_asked) == 2  # looked once more before giving up
 
 
 class ScriptedActor:
@@ -444,3 +453,20 @@ def test_two_not_found_in_a_row_plan_again(monkeypatch):
                                                          "DO: done ok"])
     assert len(planner.prompts) == 2 and "could not find 'pen icon'" in planner.prompts[1]
     assert agent.steps[-1]["action"] == "done"
+
+
+def test_landscape_looks_twice_before_saying_not_reached(monkeypatch):
+    """2026-11-21: the first look got the black frame of the rotation; the video was playing a moment later."""
+    from hidagent import agent as agent_module
+
+    monkeypatch.setattr(agent_module.vision, "changed", lambda *a, **k: True)
+    monkeypatch.setattr(agent_module, "LANDSCAPE_SETTLE", 0)
+    agent = _landscape_agent(["屏幕完全黑屏\nno", "长安姑娘的视频正在全屏播放\nyes"])
+
+    async def run():
+        agent.start("打开哔哩哔哩，搜索长安姑娘，打开第一个视频")
+        await agent._job
+
+    asyncio.run(run())
+    assert len(agent.landscape_asked) == 2
+    assert agent.steps[-1]["action"] == "done" and "全屏播放" in agent.steps[-1]["answer"]

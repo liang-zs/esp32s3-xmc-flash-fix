@@ -53,6 +53,7 @@ DRAWING = ("circle", "path")  # strokes: a missed "no change" here says little (
 
 
 FAST_ROUNDS = 3  # rounds on one plan step after which the actor thinks again
+LANDSCAPE_SETTLE = 1.5  # seconds for a rotation to finish before the landscape goal check looks
 
 
 class Agent(LocateMixin, HomeMixin, KeyboardMixin):
@@ -586,20 +587,24 @@ class Agent(LocateMixin, HomeMixin, KeyboardMixin):
 
     async def _landscape_done(self) -> str:
         """The screen went landscape: is the goal reached anyway? The answer for the user, or "" (not reached, or
-        nothing done yet, or the check failed). One question, no action."""
+        nothing done yet, or the check failed). No action, at most two questions.
+        bilibili-search, 2026-11-21: asked at once, the model got the black frame of the rotation and said no while
+        the video was already playing; so wait for the picture first, and look once more before saying no."""
         if not any(s.get("act_s") is not None for s in self.steps) or not self.screen.frame:
             return ""
-        try:
-            reply = await self.actor.chat(LANDSCAPE_DONE_PROMPT, LANDSCAPE_DONE_Q.format(task=self.task),
-                                          self.screen.frame)
-        except Exception as e:  # best effort: the task fails as before
-            log.warning("landscape goal check failed: %r", e)
-            return ""
-        lines = [x.strip() for x in reply.strip().splitlines() if x.strip()]
-        self.trace.write(self.screen.frame, kind="locate", question="landscape done?", reply=reply[-200:], spot=None)
-        if not lines or not lines[-1].lower().strip(" .*").startswith("yes"):
-            return ""
-        return (" ".join(lines[:-1]) or "目标已达成")[:300]
+        for _ in range(2):
+            await asyncio.sleep(LANDSCAPE_SETTLE)
+            frame = self.screen.frame  # the trace keeps the very frame the model saw
+            try:
+                reply = await self.actor.chat(LANDSCAPE_DONE_PROMPT, LANDSCAPE_DONE_Q.format(task=self.task), frame)
+            except Exception as e:  # best effort: the task fails as before
+                log.warning("landscape goal check failed: %r", e)
+                return ""
+            lines = [x.strip() for x in reply.strip().splitlines() if x.strip()]
+            self.trace.write(frame, kind="locate", question="landscape done?", reply=reply[-200:], spot=None)
+            if lines and lines[-1].lower().strip(" .*").startswith("yes"):
+                return (" ".join(lines[:-1]) or "目标已达成")[:300]
+        return ""
 
     async def _do(self, a: dict) -> None:
         self.task_ctx.transition(
