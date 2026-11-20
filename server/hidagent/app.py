@@ -92,6 +92,15 @@ class Text(BaseModel):
     text: str
 
 
+class Task(Text):
+    ask_help: bool = False  # pause and ask before giving up (the web console sets it; regress.py does not)
+
+
+class Help(BaseModel):
+    choice: str  # replan | continue | stop
+    hint: str = ""
+
+
 async def act(coro):
     try:
         await coro
@@ -110,7 +119,7 @@ def status():
     return {"device": device.connected, "board": device.info(), "screen": screen.live, "calibrated": phone.calibrated,
             "debug": DEBUG, "trace": str(agent.trace.dir or ""), "aspect": round(screen.aspect, 4),
             "models": {"planner": agent.planner.model, "actor": agent.actor.model},
-            "agent": {"running": agent.running, "task": agent.task,
+            "agent": {"running": agent.running, "task": agent.task, "help": agent.help,
                       "state": agent.task_ctx.snapshot(), "steps": agent.steps,
                       "progress": {"completed": agent.completed, "plan_step": agent.plan_step},
                       "usage": agent.usage}}
@@ -216,9 +225,21 @@ def calibrate_finish(p: Point):
 
 
 @app.post("/api/agent")
-async def agent_start(t: Text):
+async def agent_start(t: Task):
     try:
-        agent.start(t.text)
+        agent.start(t.text, ask_help=t.ask_help)
+    except RuntimeError as e:
+        raise HTTPException(409, str(e)) from e
+    return {"ok": True}
+
+
+@app.post("/api/agent/help")
+async def agent_help(h: Help):
+    """Answer a paused task: replan (with an optional hint for the models), continue, or stop."""
+    try:
+        agent.decide(h.choice, h.hint)
+    except ValueError as e:
+        raise HTTPException(422, str(e)) from e
     except RuntimeError as e:
         raise HTTPException(409, str(e)) from e
     return {"ok": True}

@@ -264,6 +264,21 @@ USB_ASLEEP_REASON = ("板子和 iPhone 之间的 USB 不通（板子报 phone us
                      "把板子接 iPhone 的线拔下重插（另一个口要接电源），然后重新运行任务")
 
 
+# Ask for help instead of failing (tasks started from the web console): the task pauses, the user picks replan
+# (optionally with a hint the models then see), continue, or stop. Unattended runs (tools/regress.py) still fail.
+HELP_WAIT_S = 300   # nobody answers in this long: stop, as before
+MAX_HELPS = 3       # per task, so a hopeless task still ends
+HELP_CHOICES = ("replan", "continue", "stop")
+
+
+class GiveUp(Exception):
+    """The task is about to fail; _attempt asks the user (outside the step's time limit) before it does."""
+
+    def __init__(self, reason: str, shot: bytes | None = None):
+        super().__init__(reason)
+        self.reason, self.shot = reason, shot
+
+
 class BlindError(RuntimeError):
     """The screen feed is gone; acting now would be guessing."""
 
@@ -344,12 +359,17 @@ class Agent:
         # 构造时就有状态机：未 start() 时 UI / 测试也能读到状态，start() 会再重置一次
         self.task_ctx = TaskContext(task_name="")
         self._job: asyncio.Task | None = None
+        self.ask_help = False  # this task pauses and asks before giving up (see GiveUp)
+        self.help: dict | None = None  # the open question while paused: reason, since
+        self.user_hints: list[str] = []  # hints the user gave; shown to both models
+        self.helps = 0
+        self._decision: asyncio.Future | None = None
 
     @property
     def running(self) -> bool:
         return self._job is not None and not self._job.done()
 
-    def start(self, task: str) -> None:
+    def start(self, task: str, ask_help: bool = False) -> None:
         if self.running:
             raise RuntimeError("agent already running")
         if not self.screen.live:
@@ -359,12 +379,59 @@ class Agent:
         self._pointer = (0.0, 0.0)
         self.usage, self._started = {}, time.time()
         self.task_ctx = TaskContext(task_name=task)
+        self.ask_help, self.help, self.user_hints, self.helps, self._decision = ask_help, None, [], 0, None
         self.trace.start(task)
         self._job = asyncio.create_task(self._run())
 
     def stop(self) -> None:
         if self.running:
             self._job.cancel()
+
+    def decide(self, choice: str, hint: str = "") -> None:
+        """The user's answer while the task is paused: replan (with an optional hint), continue, or stop."""
+        if choice not in HELP_CHOICES:
+            raise ValueError(f"choice must be one of {', '.join(HELP_CHOICES)}")
+        if not self._decision or self._decision.done():
+            raise RuntimeError("the agent is not waiting for an answer")
+        self._decision.set_result((choice, hint.strip()[:500]))
+
+    def _quit(self, reason: str, shot: bytes | None = None) -> bool:
+        """Give up on the task: ask first when this task may (raises GiveUp), else record the failure."""
+        if self.ask_help and self.helps < MAX_HELPS:
+            raise GiveUp(reason, shot)
+        self._record(shot, action="fail", reason=reason)
+        return True
+
+    async def _give_up(self, reason: str, shot: bytes | None = None) -> bool:
+        """Pause and ask the user what to do. True = the task ends (failure recorded)."""
+        if not (self.ask_help and self.helps < MAX_HELPS):
+            self._record(shot, action="fail", reason=reason)
+            return True
+        self.helps += 1
+        self._record(shot or self.screen.frame, action="ask", reason=reason)
+        self.help = {"reason": reason, "since": time.time()}
+        self._decision = asyncio.get_running_loop().create_future()
+        try:
+            choice, hint = await asyncio.wait_for(self._decision, HELP_WAIT_S)
+        except asyncio.TimeoutError:
+            choice, hint = "stop", ""
+            reason += f"（{HELP_WAIT_S // 60} 分钟无人回应）"
+        finally:
+            self.help, self._decision = None, None
+        self._record(action="user", choice=choice, hint=hint)
+        if choice == "stop":
+            self._record(action="fail", reason=reason)
+            return True
+        if hint:
+            self.user_hints.append(hint)
+        self.task_ctx.no_progress = self.task_ctx.rounds_on_step = self.task_ctx.stalls = 0
+        if choice == "replan":
+            await self._replan(stuck=True)
+        return False
+
+    def _hint_text(self) -> str:
+        return ("\nHints from the person watching the phone (trust them over your own guesses):"
+                + "".join(f"\n- {h}" for h in self.user_hints)) if self.user_hints else ""
 
     def clear(self) -> None:
         if self.running:
@@ -440,12 +507,14 @@ class Agent:
         """One line per run in runs.jsonl: outcome, steps, time, tokens, cost. The success rate and the
         cost per task come from these lines."""
         last = self.steps[-1] if self.steps else {}
-        acts = [s for s in self.steps if s.get("action") not in ("plan", "replan (stuck)", "stalled", "hiccup")]
+        acts = [s for s in self.steps if s.get("action") not in ("plan", "replan (stuck)", "stalled", "hiccup", "ask",
+                                                                 "user")]
         run = {"time": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(self._started or time.time())),
                "task": self.task, "result": last.get("action", ""), "reason": str(last.get("reason", ""))[:200],
                "seconds": round(time.time() - self._started, 1) if self._started else 0,
                "actions": len(acts), "replans": sum(s.get("action") == "replan (stuck)" for s in self.steps),
                "hiccups": sum(s.get("action") == "hiccup" for s in self.steps),
+               "helps": sum(s.get("action") == "ask" for s in self.steps),
                "models": {"actor": self.actor.model, "planner": self.planner.model},
                **self.usage}
         price = self.price(self._started or time.time()) if callable(self.price) else self.price
@@ -461,41 +530,47 @@ class Agent:
         return run
 
     async def _attempt(self) -> None:
-        failures, asleep, deadline = 0, 0, time.time() + self.max_seconds
+        failures, asleep = 0, 0
+        deadline, steps_left = time.time() + self.max_seconds, self.max_steps
         try:
             await self._replan()
-            for _ in range(self.max_steps):
+            while True:
                 try:
-                    if await asyncio.wait_for(self._step(), max(deadline - time.time(), 0.01)):
-                        return
-                    failures = asleep = 0
-                except asyncio.TimeoutError:
-                    raise
-                except BlindError:
-                    raise
-                except Exception as e:  # a bad reply or a dropped link: recover, don't crash
-                    self._record(action="hiccup", reason=str(e)[:300])
-                    if isinstance(e, DeviceError) and USB_ASLEEP in str(e):
-                        asleep += 1
-                        if asleep >= USB_ASLEEP_STOP:
-                            self._record(action="fail", reason=USB_ASLEEP_REASON)
+                    if steps_left <= 0 or time.time() >= deadline:
+                        if time.time() >= deadline:
+                            await self._release()
+                        raise GiveUp("step limit reached" if steps_left <= 0
+                                     else f"time limit reached ({self.max_seconds:.0f} s)")
+                    steps_left -= 1
+                    try:
+                        if await asyncio.wait_for(self._step(), max(deadline - time.time(), 0.01)):
                             return
+                        failures = asleep = 0
+                    except asyncio.TimeoutError:
+                        deadline = 0  # handled at the top of the loop
+                    except (BlindError, GiveUp):
+                        raise
+                    except Exception as e:  # a bad reply or a dropped link: recover, don't crash
+                        self._record(action="hiccup", reason=str(e)[:300])
+                        if isinstance(e, DeviceError) and USB_ASLEEP in str(e):
+                            asleep += 1
+                            if asleep >= USB_ASLEEP_STOP:
+                                raise GiveUp(USB_ASLEEP_REASON) from e
+                            await self.screen.settled()
+                            continue  # the board link is up; the USB side may wake on the next try
+                        asleep = 0
+                        board_drop = isinstance(e, DeviceError) and await self.phone.device.wait_connected(15)
+                        failures += 0 if board_drop else 1  # the board came back: not the agent's fault
+                        if failures >= self.max_failures:
+                            raise GiveUp(f"{failures} errors in a row") from e
                         await self.screen.settled()
-                        continue  # the board link is up; the USB side may wake on the next try
-                    asleep = 0
-                    board_drop = isinstance(e, DeviceError) and await self.phone.device.wait_connected(15)
-                    failures += 0 if board_drop else 1  # the board came back: not the agent's fault
-                    if failures >= self.max_failures:
-                        self._record(action="fail", reason=f"{failures} errors in a row")
+                        await self._replan(stuck=True)
+                except GiveUp as g:
+                    if await self._give_up(g.reason, g.shot):
                         return
-                    await self.screen.settled()
-                    await self._replan(stuck=True)
-                if time.time() >= deadline:
-                    raise asyncio.TimeoutError
-            self._record(action="fail", reason="step limit reached")
-        except asyncio.TimeoutError:
-            self._record(action="fail", reason=f"time limit reached ({self.max_seconds:.0f} s)")
-            await self._release()
+                    # the user stepped in: a fresh budget of time, steps and errors
+                    failures, asleep = 0, 0
+                    deadline, steps_left = time.time() + self.max_seconds, self.max_steps
         except asyncio.CancelledError:
             self._record(action="stopped")
         except BlindError as e:  # no screen, or a landscape one: acting would be guessing
@@ -613,9 +688,7 @@ class Agent:
         recovery = self.task_ctx.record_change(False, what)
         self.steps[-1]["recovery"] = recovery.value
         if recovery is Recovery.ABORT:
-            self._record(action="fail",
-                         reason=f"连续 {self.task_ctx.no_progress} 步屏幕无变化（{what}）")
-            return True
+            return self._quit(f"连续 {self.task_ctx.no_progress} 步屏幕无变化（{what}）")
         if recovery is Recovery.REPLAN:
             await self._replan(stuck=True)
         return False
@@ -631,8 +704,7 @@ class Agent:
             return recovery
         rounds = self.task_ctx.max_rounds_per_step
         if recovery is Recovery.ABORT:
-            self._record(act.pop("_shot"), action="fail",
-                         reason=f"卡在步骤「{current}」：重新规划后仍然 {rounds} 轮没有完成")
+            self._quit(f"卡在步骤「{current}」：重新规划后仍然 {rounds} 轮没有完成", act.pop("_shot"))
         else:
             self._record(act.pop("_shot"), action="stalled", reason=f"步骤「{current}」{rounds} 轮未完成")
             await self._replan(stuck=True)
@@ -687,7 +759,7 @@ class Agent:
         return (f"Already completed (verified earlier, NEVER redo):{done}\n\n" if done else "") + f"Plan:\n{plan}"
 
     async def _replan(self, stuck: bool = False) -> None:
-        prompt = f"Goal: {self.task}" + (f"\n{hints}" if (hints := app_hints(self.task)) else "")
+        prompt = f"Goal: {self.task}" + (f"\n{hints}" if (hints := app_hints(self.task)) else "") + self._hint_text()
         if self.completed:
             prompt += ("\n\nAlready completed (verified, do NOT plan these again; plan only the remaining work):"
                        + "".join(f"\n- {s}" for s in self.completed))
@@ -726,7 +798,7 @@ class Agent:
                             + effect.get(s.get("changed"), "")
                             for s in self.steps[-8:] if "plan" not in s) or "(none)"
         hints = app_hints(self.task)
-        goal = f"Goal: {self.task}" + (f"\n{hints}" if hints else "")
+        goal = f"Goal: {self.task}" + (f"\n{hints}" if hints else "") + self._hint_text()
         prompt = (f"{goal}\n\n{self._progress()}\n\nRecent actions:\n{history}\n\n"
                   f"{GOAL_CHECK}Next action? Start with DONE: yes or no (is the [now] step finished on this "
                   "screen?).")

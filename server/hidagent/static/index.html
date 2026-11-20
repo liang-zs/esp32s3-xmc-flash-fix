@@ -60,6 +60,18 @@
       <p class="msg" id="msg"></p>
     </div>
 
+    <div class="help" id="help" hidden>
+      <b data-i18n="helpTitle"></b>
+      <p id="help-reason"></p>
+      <textarea id="help-hint" rows="2" data-i18n-ph="helpPh"></textarea>
+      <div class="row">
+        <button class="primary" data-choice="replan" data-i18n="helpReplan"></button>
+        <button data-choice="continue" data-i18n="helpContinue"></button>
+        <button data-choice="stop" data-i18n="helpStop"></button>
+        <span class="help-left" id="help-left"></span>
+      </div>
+    </div>
+
     <div class="summary" id="summary" hidden>
       <div><b id="st-state"></b><span data-i18n="status"></span></div>
       <div><b id="st-steps"></b><span data-i18n="actions"></span></div>

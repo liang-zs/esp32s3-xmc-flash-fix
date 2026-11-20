@@ -93,6 +93,9 @@ body.still .hand { animation: none; }
 .setup.all-done { display: none; }
 
 .task { display: flex; flex-direction: column; gap: 8px; }
+.help { display: flex; flex-direction: column; gap: 8px; border: 2px solid var(--hl); border-radius: 12px; padding: 12px; }
+.help p { margin: 0; }
+.help-left { color: var(--muted); font-size: 12px; }
 .examples { display: flex; flex-wrap: wrap; gap: 6px; }
 .examples button { font-size: 12px; padding: 3px 10px; border-radius: 99px; color: var(--muted); }
 .msg { color: var(--muted); font-size: 13px; margin: 0; min-height: 1em; }

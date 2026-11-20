@@ -56,7 +56,7 @@ const isPlan = (s) => s.action.includes("plan");
 const isBad = (s) => ["hiccup", "stalled", "error", "fail"].includes(s.action);
 const what = (s) => describeStep(s)[lang === "zh" ? 1 : 0];
 // the model answers in English; a Chinese version is shown when it gives one
-const why = (s) => (lang === "zh" && s.thought_zh) || s.thought || s.answer || s.reason || "";
+const why = (s) => (lang === "zh" && s.thought_zh) || s.thought || s.answer || s.reason || s.hint || "";
 const planText = (s) => (lang === "zh" && s.plan_zh) || s.plan || "";
 const times = (s) => [s.think_s != null && `${t("thinking")} ${fmt(s.think_s)}`, s.act_s != null && `${t("doing")} ${fmt(s.act_s)}`].filter(Boolean).join(" · ");
 const where = (s) => ({
@@ -230,7 +230,7 @@ $("type").addEventListener("click", async () => { if (await post("/api/type", { 
 $("press").addEventListener("click", () => post("/api/key", { text: $("key").value }));
 function start(task) {
   if (!task) return say("needTask");
-  post("/api/agent", { text: task });
+  post("/api/agent", { text: task, ask_help: true });  // pause and ask before giving up
 }
 $("run").addEventListener("click", () => start($("task").value.trim()));
 $("stop").addEventListener("click", () => post("/api/agent/stop"));
@@ -238,6 +238,9 @@ $("clear").addEventListener("click", async () => {
   if (await post("/api/agent/clear")) { $("task").value = ""; say(null); }
 });
 $("estop").addEventListener("click", () => post("/api/agent/stop"));
+$("help").querySelectorAll("button[data-choice]").forEach((b) => b.addEventListener("click", async () => {
+  if (await post("/api/agent/help", { choice: b.dataset.choice, hint: $("help-hint").value.trim() })) $("help-hint").value = "";
+}));
 document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !$("zoom").open) post("/api/agent/stop"); });
 
 // ---- polling -------------------------------------------------------------------------
@@ -256,6 +259,13 @@ async function poll() {
     $("stop").hidden = !a.running;
     $("clear").hidden = a.running || !steps.length;
     $("live-dot").classList.toggle("on", a.running);
+    const help = a.help;  // a paused task waiting for the user's answer
+    $("help").hidden = !help;
+    if (help) {
+      $("help-reason").textContent = help.reason;
+      $("help-left").textContent = t("helpLeft").replace("{m}", Math.max(1, Math.ceil((help.since + 300 - Date.now() / 1000) / 60)));
+    }
+    document.title = (help ? "⏸ " : "") + "ESP32 iPhone Agent";
 
     aspect = s.aspect || aspect;
     const avg = (xs) => (xs.length ? fmt(xs.reduce((n, x) => n + x, 0) / xs.length) : "–");
