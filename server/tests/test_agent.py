@@ -581,3 +581,11 @@ def test_home_fast_path_falls_back_to_the_search_when_it_does_not_reach_home(tmp
     asyncio.run(agent._do({"action": "home"}))
     assert agent.phone.did[:2] == [("double", 750, 947), ("double", 750, 947)]
     assert agent.phone.did[2:] == [("double", 880, 770)] and agent.phone.moves == [(500, 500)]
+
+
+def test_type_turns_full_width_punctuation_into_ascii():
+    # the user's Chinese keyboard writes 输入Hello world！; the board can type the ASCII "!" right away
+    assert parse_actions("DO: type Hello world！")[0]["text"] == "Hello world!"
+    assert parse_actions("DO: type Ｈｉ，ｙｏｕ？")[0]["text"] == "Hi,you?"
+    with pytest.raises(ValueError, match="pinyin"):  # Chinese characters still go through pinyin
+        parse_actions("DO: type 你好！")

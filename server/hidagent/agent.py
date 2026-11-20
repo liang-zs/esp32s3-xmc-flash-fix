@@ -6,6 +6,7 @@ import logging
 import math
 import re
 import time
+import unicodedata
 from collections.abc import Callable
 from pathlib import Path
 
@@ -56,7 +57,9 @@ What the agent can do: tap or describe-and-tap things, swipe, type ASCII text, e
 keypad keys, go to the Home Screen, go back. It cannot speak or listen (no dictation, no voice Siri), cannot use
 the camera, Face ID or a passcode, and cannot read sound: never plan steps that need those.
 Chinese text must end up as Chinese characters: plan a step "enter <the Chinese text> with pinyin" (the agent
-switches keyboards itself); never settle for Latin pinyin letters in its place, and delete such letters first."""
+switches keyboards itself); never settle for Latin pinyin letters in its place, and delete such letters first.
+Full-width punctuation in the goal (！？，。：；) is only the user's Chinese keyboard: next to Latin text it means the
+ASCII mark (输入Hello world！ -> type "Hello world!"). Never plan a hunt for symbols on the on-screen keyboard."""
 
 
 ACTOR_PROMPT = """You control a real iPhone 11 through a USB mouse and keyboard (an ESP32-S3 board). Each turn you get a
@@ -129,7 +132,8 @@ OPENING AN APP:
 
 TEXT INPUT: type sends ASCII only. Other fields than Spotlight: tap them first if no cursor shows. After
 typing, check the text appeared; if not, refocus the field. A hidden on-screen keyboard does not mean the
-field lost focus (the USB keyboard can hide it).
+field lost focus (the USB keyboard can hide it). Never tap on-screen keyboard keys for letters or punctuation:
+type them (full-width ！？，。 in the goal next to Latin text: type ! ? , .).
 
 CHINESE: "type" turns Chinese characters into garbage. Use pinyin with the toneless letters of the whole
 phrase: 长安姑娘 -> DO: pinyin changanguniang (ü is v: 女 -> nv). It switches to the Pinyin keyboard, types,
@@ -186,6 +190,9 @@ def parse_command(line: str) -> dict:
     keys = ACTIONS[name]
     if keys and keys[0] in TEXT_ARGS:
         text = rest.strip().strip('"')
+        if name == "type":  # full-width ！？，Ａ (a Chinese keyboard's habit) -> their ASCII forms; CJK stays as is
+            text = "".join(unicodedata.normalize("NFKC", c) if 0xFF01 <= ord(c) <= 0xFF5E or c == "\u3000" else c
+                           for c in text)
         if name == "type" and not text.isascii():  # the board types ASCII keys only: Chinese came out as garbage
             raise ValueError(f"type sends ASCII only, it cannot enter {text[:20]!r}. For Chinese use the pinyin "
                              "action with the pinyin letters, e.g. 长安姑娘 -> DO: pinyin changanguniang")
