@@ -1,5 +1,6 @@
 """Minimal client for any OpenAI-compatible chat endpoint (vision models)."""
 
+import asyncio
 import base64
 import json
 import logging
@@ -13,6 +14,10 @@ BEIJING = timezone(timedelta(hours=8))  # DeepSeek peak hours are in Beijing tim
 
 TOKEN_PARAMS = ("max_tokens", "max_completion_tokens")
 MAX_TOKENS = 2000  # reply budget incl. a reasoning model's thinking (deepseek-flash thinks ~400+ tokens per step)
+# Busy or flaky API (429, 5xx, a dropped connection): wait and try again rather than end the task. A replan
+# that the user asked for from the help panel used to be lost to a single 503 at peak hours.
+RETRY_WAITS = (1.0, 3.0)
+RETRY_STATUS = {408, 429, 500, 502, 503, 504}
 
 
 class LLM:
@@ -60,12 +65,23 @@ class LLM:
         return reply
 
     async def _post(self, body: dict, max_tokens: int) -> dict:
-        r = await self._http.post("/chat/completions", json={self.token_param: max_tokens, **body})
-        if r.status_code == 400 and self._auto and "max_completion_tokens" in r.text:
-            self.token_param, self._auto = "max_completion_tokens", False
-            r = await self._http.post("/chat/completions", json={self.token_param: max_tokens, **body})
-        r.raise_for_status()
-        return r.json()
+        for wait in (*RETRY_WAITS, None):
+            try:
+                r = await self._http.post("/chat/completions", json={self.token_param: max_tokens, **body})
+                if r.status_code == 400 and self._auto and "max_completion_tokens" in r.text:
+                    self.token_param, self._auto = "max_completion_tokens", False
+                    r = await self._http.post("/chat/completions", json={self.token_param: max_tokens, **body})
+                if r.status_code not in RETRY_STATUS or wait is None:
+                    r.raise_for_status()
+                    return r.json()
+                why = f"HTTP {r.status_code}"
+            except (httpx.TimeoutException, httpx.NetworkError, httpx.RemoteProtocolError) as e:
+                if wait is None:
+                    raise
+                why = repr(e)
+            log.warning("%s: %s, retrying in %.0f s", self.model, why, wait)
+            await asyncio.sleep(wait)
+        raise AssertionError("unreachable")
 
 
 USAGE_KEYS = ("prompt", "completion", "reasoning", "cache_hit")

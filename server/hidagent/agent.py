@@ -58,6 +58,9 @@ keypad keys, go to the Home Screen, go back. It cannot speak or listen (no dicta
 the camera, Face ID or a passcode, and cannot read sound: never plan steps that need those.
 Chinese text must end up as Chinese characters: plan a step "enter <the Chinese text> with pinyin" (the agent
 switches keyboards itself); never settle for Latin pinyin letters in its place, and delete such letters first.
+Drawing: plan each part as a stroke (dots and eyes are small circles, a mouth or leaf a curved line); never plan
+taps on the canvas while a pen is active, not even to deselect (the gray dot there is the mouse pointer). Start on a
+new, empty board unless the goal says to add to an existing drawing.
 Full-width punctuation in the goal (！？，。：；) is only the user's Chinese keyboard: next to Latin text it means the
 ASCII mark (输入Hello world！ -> type "Hello world!"). Never plan a hunt for symbols on the on-screen keyboard."""
 
@@ -96,7 +99,7 @@ tap X Y        an unnamed point only (empty spot, canvas, picker wheel)
 press KEYS     keypad keys by label, e.g. press 1 2 8 x 3 7 = (see KEYPADS)
 swipe X1 Y1 X2 Y2   content up: swipe 500 750 500 350; down: swipe 500 350 500 750;
                next Home Screen page / App Library: swipe 850 450 150 450
-path X1 Y1 X2 Y2 ...   circle X Y R   (drawing)
+path X1 Y1 X2 Y2 ...   circle X Y R   (drawing; see DRAWING)
 type TEXT      ASCII text into the focused field
 pinyin LETTERS Chinese text (see CHINESE)
 clear          empty the focused text field (instead of cmd+a or the field's x button)
@@ -109,6 +112,11 @@ TAPON: describe what to tap instead of giving coordinates: "DO: tapon General ro
 above the Dock", "DO: tapon Notes app icon under Top Hit". Name its visible text plus what kind of element it
 is, and where, if that text appears more than once. Never write "tap X Y" for something you can name: your own
 coordinates miss small targets far more often (the Search pill was missed again and again at y 790-890).
+
+DRAWING: draw every part as a stroke big enough to see: a dot or an eye is "circle X Y 15" or bigger, a mouth
+or leaf a path of several points. Never "tap" on a canvas while a pen is active (it leaves a dot you cannot
+see, under the pointer), not even to deselect. The plain gray dot on the canvas is the mouse pointer, not a
+selection handle. Unless the goal says to draw on the existing drawing, start on a new, empty board.
 
 HOME: "DO: home" is ONE action: the system double-taps the AssistiveTouch button (or uses its menu) for you.
 Never tap AssistiveTouch or its menu yourself, never swipe up from the bottom edge (unreliable here). If the
@@ -269,6 +277,10 @@ USB_ASLEEP_REASON = ("板子和 iPhone 之间的 USB 不通（板子报 phone us
 HELP_WAIT_S = 300   # nobody answers in this long: stop, as before
 MAX_HELPS = 3       # per task, so a hopeless task still ends
 HELP_CHOICES = ("replan", "continue", "stop")
+
+
+AT_AVOID = 70  # a coordinate tap this close to the AssistiveTouch button (in screen-width units) is refused
+DRAWING = ("circle", "path")  # strokes: a missed "no change" here says little (see _step)
 
 
 class GiveUp(Exception):
@@ -675,6 +687,13 @@ class Agent:
 
         self.steps[-1]["changed"] = changed
 
+        if not changed and self.steps[-1].get("action") in DRAWING:
+            # a short or thin stroke can sit under the pointer, which the check ignores: not seeing it is no
+            # proof it failed (iPhone 11, 2026-11-20: leaves and eye dots counted as "no change", the smiley
+            # task failed and the flower one stopped to ask). Leave it to the actor's next look.
+            self.steps[-1]["changed"] = None
+            return False
+
         if not changed:
             # 自动失败检测：屏幕没有任何变化，按状态机给出的策略恢复
             return await self._handle_no_change(self.steps[-1].get("action", "动作"))
@@ -821,6 +840,14 @@ class Agent:
                 prompt += (f"\n\nYou just proposed {json.dumps(_key(acts[0]))} again, but it changed nothing last "
                            "time. Choose a different action (another position, a shorter swipe, or another way).")
                 retry = "repeated"
+                continue
+            if blocked := self._on_at_button(acts):
+                log.info("actor tapped the AssistiveTouch button at %s; asking for another spot", blocked)
+                prompt += (f"\n\nYour tap at {blocked[0]} {blocked[1]} would hit the AssistiveTouch floating button "
+                           f"(at about {blocked[2]} {blocked[3]}), which opens its menu instead. For a control under "
+                           f"or next to it, use tapon with the control's name, or tap at least {AT_AVOID + 10} "
+                           "units away from the button.")
+                retry = "rejected"
                 continue
             acts[0]["think_s"] = seconds
             return [{**a, "_shot": frame} for a in acts]  # every action is drawn on the same screenshot
@@ -1021,6 +1048,21 @@ class Agent:
             return None
         return (int(x), int(y)) if x is not None else None
 
+    def _on_at_button(self, acts: list[dict]) -> tuple[int, int, int, int] | None:
+        """A coordinate tap that would land on the AssistiveTouch button (at its remembered spot): (x, y, bx, by).
+        iPhone 11, 2026-11-20: "tap 690 940" for Freeform's pen tool opened the AssistiveTouch menu instead."""
+        button = self._known_at_button()
+        if not button:
+            return None
+        aspect = self.screen.aspect or 0.46
+        for a in acts:
+            if a.get("action") == "tap":
+                # distance in width units: y counts in units of the height, which is 1/aspect times longer
+                dx, dy = a["x"] - button[0], (a["y"] - button[1]) / aspect
+                if math.hypot(dx, dy) < AT_AVOID:
+                    return int(a["x"]), int(a["y"]), *button
+        return None
+
     def _remember_at_button(self, spot: tuple[int, int]) -> None:
         f = self._at_file()
         if f:
@@ -1126,7 +1168,7 @@ def _pointer_path(act: dict) -> list[tuple[float, float]]:
     match act["action"]:
         case "tap": return [f(act["x"], act["y"])]
         case "swipe": return [f(act["x1"], act["y1"]), f(act["x2"], act["y2"])]
-        case "path": return [f(*p) for p in act["points"]]
+        case "path": return [f(*act["points"][-1])]  # masking every point would hide the stroke itself
         case "circle": return [f(act["x"] + act["r"], act["y"])]
         case "home": return [f(x, y) for x, y in act.get("taps", [(500, 995), (500, 600)])]
         case "back": return [(0.005, 0.45), (0.6, 0.45)]

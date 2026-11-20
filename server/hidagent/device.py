@@ -9,6 +9,7 @@ import hmac
 import logging
 import os
 import re
+import secrets
 import socket
 import subprocess
 import termios
@@ -32,9 +33,14 @@ def broadcast_addrs(ifconfig: str) -> list[str]:
     return list(dict.fromkeys(found + ["255.255.255.255"]))
 
 
-def link_auth(key: str, nonce: str) -> str:
-    """The answer the board expects to its hello nonce: hex HMAC-SHA256(key, nonce)."""
-    return hmac.new(key.encode(), nonce.encode(), hashlib.sha256).hexdigest()
+def link_auth(key: str, message: str) -> str:
+    """Hex HMAC-SHA256(key, message): how each end proves it knows LINK_KEY."""
+    return hmac.new(key.encode(), message.encode(), hashlib.sha256).hexdigest()
+
+
+def _ip(addr) -> str:
+    host = addr[0] if addr else ""
+    return host.removeprefix("::ffff:")
 
 
 class DeviceError(RuntimeError):
@@ -151,21 +157,35 @@ class Device:
         self._attach(reader, writer, hello, f"{peer[0]}:{peer[1]}" if peer else "", serial=False)
 
     async def _auth(self, reader, writer, hello: str) -> bool:
-        """A board with LINK_KEY ends its hello with a nonce; prove we know the key before anything else."""
+        """With LINK_KEY both ends prove they know it, each over the other's nonce and the address it sees the
+        other at (so a relay in the middle fails):
+            board  -> hello <reason> <uptime> <nonce_b>
+            server -> auth <HMAC(key, "server|" + nonce_b + "|" + board IP)> <nonce_s>
+            board  -> ok <HMAC(key, "board|" + nonce_s + "|" + server IP)>
+        Without the board's proof anyone on the network could pose as the board and take its link over."""
         words = hello.split()
-        if len(words) < 4 or words[0] != "hello":
-            return True  # no nonce: the board does not ask
+        offered = len(words) >= 4 and words[0] == "hello"
         if not self.key:
-            log.warning("board asks for link auth but LINK_KEY is not set; turning it away")
+            if offered:
+                log.warning("board asks for link auth but LINK_KEY is not set; turning it away")
+            return not offered
+        if not offered:
+            log.warning("a client on the board port did not offer link auth (old firmware, or not the board); "
+                        "turning it away: %s", hello[:60])
             return False
+        board_ip, server_ip = _ip(writer.get_extra_info("peername")), _ip(writer.get_extra_info("sockname"))
+        mine = secrets.token_hex(8)
         try:
-            writer.write(f"auth {link_auth(self.key, words[3])}\n".encode())
+            writer.write(f"auth {link_auth(self.key, f'server|{words[3]}|{board_ip}')} {mine}\n".encode())
             await writer.drain()
             reply = (await asyncio.wait_for(reader.readline(), 3)).decode(errors="replace").strip()
         except (OSError, asyncio.TimeoutError) as e:
             reply = repr(e)
-        if reply != "ok":
-            log.warning("board refused our link auth (%s): LINK_KEY differs from the firmware's", reply)
+        status, _, proof = reply.partition(" ")
+        expected = link_auth(self.key, f"board|{mine}|{server_ip}")
+        if status != "ok" or not hmac.compare_digest(proof.encode(), expected.encode()):
+            log.warning("link auth failed from %s (%s): LINK_KEY differs, or this is not the board",
+                        board_ip, reply[:40])
             return False
         return True
 

@@ -257,3 +257,79 @@ def test_decide_only_while_paused_and_only_known_choices():
         agent.decide("replan")
     with pytest.raises(ValueError):
         agent.decide("maybe")
+
+
+def test_strokes_that_look_unchanged_do_not_count_as_no_change(monkeypatch):
+    """A stroke under the pointer is invisible to the change check: drawing must not fail the task for it."""
+    from hidagent import agent as agent_module
+
+    monkeypatch.setattr(agent_module.vision, "changed", lambda *a, **k: False)
+
+    class DrawLLM:  # a new stroke each time (the same one three times in a row is a loop, replanned)
+        model = "fake"
+        n = 0
+
+        async def chat(self, system, text, image=None, max_tokens=600, temperature=0):
+            self.n += 1
+            return f"THINK: next stroke\nDO: circle {300 + 40 * self.n} 380 15"
+
+    class Phone:
+        async def drag(self, points):
+            return None
+
+    class QuietScreen(Screen):
+        async def settled(self):
+            return None
+
+    agent = Agent(phone=Phone(), screen=QuietScreen(), actor=DrawLLM(), planner=PlanLLM(), trace=Trace(),
+                  max_steps=5)
+
+    async def run():
+        agent.start("画一个笑脸")
+        await agent._job
+
+    asyncio.run(run())
+    draws = [s for s in agent.steps if s["action"] == "circle"]
+    assert len(draws) == 5 and all(s.get("changed") is None for s in draws)
+    assert agent.steps[-1]["reason"] == "step limit reached"  # not "连续 3 步屏幕无变化"
+
+
+def test_a_path_masks_only_where_the_pointer_ends():
+    from hidagent.agent import _pointer_path
+
+    assert _pointer_path({"action": "path", "points": [[500, 600], [460, 585], [435, 600]]}) == [(0.435, 0.6)]
+
+
+def test_a_tap_on_the_assistivetouch_button_is_sent_back(tmp_path):
+    import json
+
+    (tmp_path / "assistivetouch.json").write_text(json.dumps({"button": [750, 947]}))
+
+    class TwoTapLLM:  # first right on the button (the Freeform pen-tool miss), then elsewhere
+        model = "fake"
+
+        def __init__(self):
+            self.prompts = []
+
+        async def chat(self, system, text, image=None, max_tokens=600, temperature=0):
+            self.prompts.append(text)
+            return "THINK: pen tool\nDO: tap 690 940" if len(self.prompts) == 1 else "THINK: pen\nDO: tap 65 940"
+
+    actor = TwoTapLLM()
+    agent = Agent(phone=None, screen=Screen(), actor=actor, planner=PlanLLM(), trace=Trace(),
+                  runs_file=tmp_path / "runs.jsonl")
+    agent.task = "画一朵花"
+    acts = asyncio.run(agent._next_actions())
+    assert (acts[0]["x"], acts[0]["y"]) == (65, 940)
+    assert "AssistiveTouch floating button" in actor.prompts[1]
+
+
+def test_taps_away_from_the_button_pass(tmp_path):
+    import json
+
+    (tmp_path / "assistivetouch.json").write_text(json.dumps({"button": [750, 947]}))
+    agent = Agent(phone=None, screen=Screen(), actor=LLM(), planner=LLM(), trace=Trace(),
+                  runs_file=tmp_path / "runs.jsonl")
+    assert agent._on_at_button([{"action": "tap", "x": 900, "y": 82}]) is None
+    assert agent._on_at_button([{"action": "tap", "x": 760, "y": 960}]) == (760, 960, 750, 947)
+    assert agent._on_at_button([{"action": "tapon", "what": "Done"}]) is None

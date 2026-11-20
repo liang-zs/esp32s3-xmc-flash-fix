@@ -216,36 +216,81 @@ async def _dial(port: int, hello: bytes):
     return reader, writer
 
 
-def test_board_with_a_nonce_is_linked_once_the_server_proves_the_key():
-    from hidagent.device import link_auth
+class FakeAuthBoard:
+    """Board end of the TCP auth: checks the server's proof, answers with its own (or a wrong one)."""
 
+    def __init__(self, key: str):
+        self.key = key
+
+    async def run(self, port: int, prove: bool = True):
+        from hidagent.device import link_auth
+
+        reader, writer = await asyncio.open_connection("127.0.0.1", port)
+        writer.write(b"hello power-on 99 abc12345\n")
+        await writer.drain()
+        _, proof, theirs = (await asyncio.wait_for(reader.readline(), 2)).decode().split()
+        self.server_ok = proof == link_auth(self.key, "server|abc12345|127.0.0.1")
+        mine = link_auth(self.key, f"board|{theirs}|127.0.0.1") if prove else "0" * 64
+        writer.write(f"ok {mine}\n".encode())
+        await writer.drain()
+        return reader, writer
+
+
+def test_both_ends_prove_the_key_then_the_board_is_linked():
     async def scenario():
         device = Device(key="k3y")
         server = await device.serve("127.0.0.1", 0)
-        port = server.sockets[0].getsockname()[1]
-        reader, writer = await _dial(port, b"hello power-on 99 abc123\n")
-        line = (await asyncio.wait_for(reader.readline(), 2)).decode().strip()
-        assert line == "auth " + link_auth("k3y", "abc123")
-        writer.write(b"ok\n")
-        await writer.drain()
+        board = FakeAuthBoard("k3y")
+        _, writer = await board.run(server.sockets[0].getsockname()[1])
+        assert board.server_ok  # the server's proof covers the board's nonce and the board's address
         assert await device.wait_connected(2)
-        assert device.hello == "hello power-on 99 abc123"
+        assert device.hello == "hello power-on 99 abc12345"
         writer.close()
         server.close()
 
     asyncio.run(scenario())
 
 
-def test_board_that_refuses_our_auth_is_not_linked():
+def test_a_client_that_cannot_prove_the_key_is_not_linked():
     async def scenario():
-        device = Device(key="wrong")
+        device = Device(key="k3y")
+        server = await device.serve("127.0.0.1", 0)
+        _, writer = await FakeAuthBoard("k3y").run(server.sockets[0].getsockname()[1], prove=False)
+        assert not await device.wait_connected(0.5)
+        writer.close()
+        server.close()
+
+    asyncio.run(scenario())
+
+
+def test_with_a_key_a_client_without_a_nonce_cannot_take_the_link():
+    """Before: any 'hello' without a nonce got in and replaced the real board's link."""
+    async def scenario():
+        device = Device(key="k3y")
         server = await device.serve("127.0.0.1", 0)
         port = server.sockets[0].getsockname()[1]
-        reader, writer = await _dial(port, b"hello power-on 99 abc123\n")
-        await asyncio.wait_for(reader.readline(), 2)  # our auth line
-        writer.write(b"err auth\n")
-        await writer.drain()
-        assert not await device.wait_connected(0.5)
+        _, real = await FakeAuthBoard("k3y").run(port)
+        assert await device.wait_connected(2)
+        reader, writer = await _dial(port, b"hello power-on 1\n")  # an impostor without a nonce
+        try:
+            assert await asyncio.wait_for(reader.read(), 2) == b""  # hung up on
+        except ConnectionResetError:
+            pass
+        assert device.links == 1 and device.connected  # the real board keeps its link
+        writer.close()
+        real.close()
+        server.close()
+
+    asyncio.run(scenario())
+
+
+def test_wrong_key_on_the_board_side_fails():
+    async def scenario():
+        device = Device(key="k3y")
+        server = await device.serve("127.0.0.1", 0)
+        board = FakeAuthBoard("other")
+        _, writer = await board.run(server.sockets[0].getsockname()[1])
+        assert not board.server_ok and not await device.wait_connected(0.5)
         writer.close()
         server.close()
 

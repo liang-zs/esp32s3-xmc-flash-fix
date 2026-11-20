@@ -2,6 +2,7 @@ import asyncio
 import json
 
 import httpx
+import pytest
 
 from hidagent.llm import LLM
 
@@ -104,3 +105,41 @@ def test_fast_calls_add_the_fast_body_and_careful_ones_do_not():
     asyncio.run(llm.chat("sys", "hi"))
     assert seen[0]["thinking"] == {"type": "disabled"} and seen[0]["a"] == 1
     assert "thinking" not in seen[1] and seen[1]["a"] == 1
+
+
+def _flaky(statuses, monkeypatch):
+    """An LLM whose server answers with these status codes in turn (then 200), without real waiting."""
+    from hidagent import llm as llm_module
+
+    monkeypatch.setattr(llm_module, "RETRY_WAITS", (0.0, 0.0))
+    calls = []
+
+    def handle(request):
+        calls.append(1)
+        code = statuses[len(calls) - 1] if len(calls) <= len(statuses) else 200
+        if code != 200:
+            return httpx.Response(code, text="busy")
+        return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}]})
+
+    llm = LLM("http://test/v1", "m")
+    llm._http = httpx.AsyncClient(base_url="http://test/v1", transport=httpx.MockTransport(handle))
+    return llm, calls
+
+
+def test_busy_api_is_retried(monkeypatch):
+    llm, calls = _flaky([503, 429], monkeypatch)
+    assert asyncio.run(llm.chat("s", "t")) == "ok" and len(calls) == 3
+
+
+def test_retries_give_up_after_three_tries(monkeypatch):
+    llm, calls = _flaky([503, 503, 503, 503], monkeypatch)
+    with pytest.raises(httpx.HTTPStatusError):
+        asyncio.run(llm.chat("s", "t"))
+    assert len(calls) == 3
+
+
+def test_a_bad_request_is_not_retried(monkeypatch):
+    llm, calls = _flaky([401], monkeypatch)
+    with pytest.raises(httpx.HTTPStatusError):
+        asyncio.run(llm.chat("s", "t"))
+    assert len(calls) == 1
