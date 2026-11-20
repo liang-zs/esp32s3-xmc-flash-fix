@@ -255,6 +255,15 @@ def _key(step: dict) -> dict:
     return {k: v for k, v in step.items() if k not in META}
 
 
+# The board answers "err phone usb asleep" when its USB link to the iPhone is down (phone locked, or the iPhone
+# stopped using the board, e.g. after it rebooted on poor power). Retrying or replanning cannot fix that: on
+# 2026-11-20 a bilibili task replanned 9 times in a minute and never ended. Stop on the second one in a row.
+USB_ASLEEP = "usb asleep"
+USB_ASLEEP_STOP = 2
+USB_ASLEEP_REASON = ("板子和 iPhone 之间的 USB 不通（板子报 phone usb asleep）：确认手机已解锁，"
+                     "把板子接 iPhone 的线拔下重插（另一个口要接电源），然后重新运行任务")
+
+
 class BlindError(RuntimeError):
     """The screen feed is gone; acting now would be guessing."""
 
@@ -452,20 +461,28 @@ class Agent:
         return run
 
     async def _attempt(self) -> None:
-        failures, deadline = 0, time.time() + self.max_seconds
+        failures, asleep, deadline = 0, 0, time.time() + self.max_seconds
         try:
             await self._replan()
             for _ in range(self.max_steps):
                 try:
                     if await asyncio.wait_for(self._step(), max(deadline - time.time(), 0.01)):
                         return
-                    failures = 0
+                    failures = asleep = 0
                 except asyncio.TimeoutError:
                     raise
                 except BlindError:
                     raise
                 except Exception as e:  # a bad reply or a dropped link: recover, don't crash
                     self._record(action="hiccup", reason=str(e)[:300])
+                    if isinstance(e, DeviceError) and USB_ASLEEP in str(e):
+                        asleep += 1
+                        if asleep >= USB_ASLEEP_STOP:
+                            self._record(action="fail", reason=USB_ASLEEP_REASON)
+                            return
+                        await self.screen.settled()
+                        continue  # the board link is up; the USB side may wake on the next try
+                    asleep = 0
                     board_drop = isinstance(e, DeviceError) and await self.phone.device.wait_connected(15)
                     failures += 0 if board_drop else 1  # the board came back: not the agent's fault
                     if failures >= self.max_failures:

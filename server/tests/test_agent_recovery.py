@@ -109,3 +109,36 @@ def test_loop_fails_after_three_silent_steps(monkeypatch):
     assert agent.steps[-1]["action"] == "fail"
     assert "屏幕无变化" in agent.steps[-1]["reason"]
     assert agent.task_ctx.no_progress >= 3
+
+
+def test_phone_usb_asleep_twice_stops_with_a_hint():
+    """板子报 usb asleep（和 iPhone 的 USB 不通）：第二次就停，给出重插提示，不再反复重新规划。"""
+    from hidagent.device import DeviceError
+
+    class Device:
+        connected = True
+
+        async def wait_connected(self, timeout):
+            return True
+
+    class AsleepPhone:
+        device = Device()
+
+        async def tap(self, x, y, aim=False):
+            raise DeviceError("err phone usb asleep (unlock the phone)")
+
+    class QuietScreen(Screen):
+        async def settled(self):
+            return None
+
+    agent = Agent(phone=AsleepPhone(), screen=QuietScreen(), actor=TapLLM(), planner=PlanLLM(),
+                  trace=Trace(), max_steps=20)
+
+    async def run():
+        agent.start("打开哔哩哔哩")
+        await agent._job
+
+    asyncio.run(run())
+    actions = [s["action"] for s in agent.steps]
+    assert actions.count("hiccup") == 2 and "replan (stuck)" not in actions
+    assert agent.steps[-1]["action"] == "fail" and "重插" in agent.steps[-1]["reason"]
