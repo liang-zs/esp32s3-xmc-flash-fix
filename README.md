@@ -36,7 +36,14 @@
 server/                 第二代服务端（本仓库主体）
   hidagent/
     app.py              FastAPI：Web UI + /api/* 控制接口 + 设备接入
-    agent.py            see-think-act 循环：planner 出计划，actor 每步一个动作
+    agent.py            see-think-act 循环：planner 出计划，actor 每步一个动作；暂停求助
+    prompts.py          所有给模型的提示词和单问题（改措辞前先离线回放）
+    commands.py         actor 回复格式：DO 行 → 动作，计划拆步，动作的几何
+    locate.py           对当前帧的快问：某物在哪、悬浮球在不在、是不是主屏
+    home.py             经 AssistiveTouch 回主屏，记住悬浮球位置
+    keyboard.py         看着键盘切拼音/英文，按标签按键盘键
+    errors.py           循环捕获的异常：GiveUp / BlindError / LandscapeError
+    webauth.py          网页控制台口令（WEB_TOKEN）
     phone.py            标定、aim 补偿、tap/swipe/type/key/scroll 等高层手势
     device.py           ESP32 板的 TCP 链路：单命令串行、超时、心跳保活
     screen.py           UxPlay 接收端，维护最新 JPEG 帧

@@ -3,7 +3,8 @@ after Settings → General → About → Home the actor saw the Home Screen and 
 
 import asyncio
 
-from hidagent.agent import Agent, parse_actions, plan_steps
+from hidagent.agent import Agent
+from hidagent.commands import parse_actions, plan_steps
 from hidagent.debug import Trace
 
 PLAN = "1. Tap Settings.\n2. Tap General.\n3. Tap About.\n4. Return to the Home Screen.\n5. Open Notes."

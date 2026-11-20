@@ -12,8 +12,9 @@ import sys
 import time
 from pathlib import Path
 
-from hidagent.agent import ACTOR_PROMPT, parse_actions
+from hidagent.commands import parse_actions
 from hidagent.llm import LLM
+from hidagent.prompts import ACTOR_PROMPT
 
 MODES = {"think": False, "fast": True}
 

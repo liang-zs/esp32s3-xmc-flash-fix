@@ -2,7 +2,7 @@ import math
 
 import pytest
 
-from hidagent.agent import circle, parse_actions, parse_command, parse_plan
+from hidagent.commands import circle, parse_actions, parse_command, parse_plan
 
 
 def test_parse_single_action():
@@ -98,7 +98,7 @@ def test_chinese_goes_through_pinyin_not_type():
     # iPhone 11, 2026-11-17: "type 长安姑娘" came out as "9j;5952f53m" in bilibili search
     import pytest
 
-    from hidagent.agent import parse_command
+    from hidagent.commands import parse_command
     with pytest.raises(ValueError, match="pinyin"):
         parse_command("type 长安姑娘")
     assert parse_command("pinyin chang'an gu niang") == {"action": "pinyin", "text": "changanguniang"}
@@ -434,7 +434,7 @@ def test_home_by_double_tap_tries_twice_then_fails(monkeypatch):
 def test_the_pointer_is_parked_in_the_middle_and_an_answer_there_is_the_pointer():
     import asyncio
 
-    from hidagent.agent import AT_BUTTON_Q2
+    from hidagent.prompts import AT_BUTTON_Q2
     agent = _home_agent({"button": "none", "home": "none"})
 
     async def chat(system, text, image=None, max_tokens=600, temperature=0, fast=False):
@@ -471,7 +471,7 @@ def test_a_landscape_screen_stops_the_agent():
 
     import pytest
 
-    from hidagent.agent import LandscapeError
+    from hidagent.errors import LandscapeError
     agent = _home_agent({"button": "750 945", "home": "none"})
     type(agent.screen).aspect = 16 / 9
     with pytest.raises(LandscapeError):
@@ -482,10 +482,10 @@ def test_a_landscape_screen_stops_the_agent():
 
 def _pinyin_agent(keyboards):
     """An agent whose keyboard question is answered from `keyboards` in turn; the phone logs keys and text."""
-    import hidagent.agent as agent_module
+    import hidagent.keyboard as keyboard_module
     from hidagent.agent import Agent
     from hidagent.debug import Trace
-    agent_module.KEYBOARD_SWITCH = 0
+    keyboard_module.KEYBOARD_SWITCH = 0
     answers = iter(keyboards)
 
     class Screen:

@@ -295,7 +295,7 @@ def test_strokes_that_look_unchanged_do_not_count_as_no_change(monkeypatch):
 
 
 def test_a_path_masks_only_where_the_pointer_ends():
-    from hidagent.agent import _pointer_path
+    from hidagent.commands import _pointer_path
 
     assert _pointer_path({"action": "path", "points": [[500, 600], [460, 585], [435, 600]]}) == [(0.435, 0.6)]
 
