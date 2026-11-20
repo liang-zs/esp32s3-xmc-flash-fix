@@ -538,9 +538,40 @@ def test_pinyin_fails_when_it_cannot_reach_pinyin_and_falls_back_without_a_keybo
     with pytest.raises(ValueError, match="could not switch"):
         asyncio.run(agent._do({"action": "pinyin", "text": "ceshi"}))
     assert "type ceshi" not in agent.phone.sent
-    agent = _pinyin_agent(["none"])
+    agent = _pinyin_agent(["none", "none"])  # "none" twice in a row: really no on-screen keyboard
     asyncio.run(agent._do({"action": "pinyin", "text": "ceshi"}))
     assert agent.phone.sent == ["blind pinyin ceshi"]
+
+
+def test_one_none_is_checked_again_before_typing_blind(monkeypatch):
+    """bilibili-search, 2026-11-20: one bad frame said 'none' and the blind fallback typed Latin letters."""
+    import asyncio
+
+    import hidagent.agent as agent_module
+    monkeypatch.setattr(agent_module.asyncio, "sleep", _no_sleep)
+    agent = _pinyin_agent(["none", "pinyin", "pinyin", "english"])
+    asyncio.run(agent._do({"action": "pinyin", "text": "changanguniang"}))
+    assert agent.phone.sent == ["type changanguniang", "key space", "key ctrl+space"]
+
+
+def test_keyboard_question_waits_for_a_portrait_frame(monkeypatch):
+    import asyncio
+
+    import hidagent.agent as agent_module
+    monkeypatch.setattr(agent_module.asyncio, "sleep", _no_sleep)
+    agent = _pinyin_agent(["english"])
+    looks = iter([1.78, 1.78, 0.46])  # two glitch frames in landscape, then portrait again
+
+    class Screen:
+        live, frame = True, b"jpeg"
+
+        @property
+        def aspect(self):
+            return next(looks, 0.46)
+
+    agent.screen = Screen()
+    assert asyncio.run(agent._keyboard()) == "english"
+    assert next(looks, None) is None  # it looked until the frame was portrait
 
 
 async def _no_sleep(*a, **k):

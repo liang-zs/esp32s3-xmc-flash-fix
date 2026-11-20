@@ -333,3 +333,59 @@ def test_taps_away_from_the_button_pass(tmp_path):
     assert agent._on_at_button([{"action": "tap", "x": 900, "y": 82}]) is None
     assert agent._on_at_button([{"action": "tap", "x": 760, "y": 960}]) == (760, 960, 750, 947)
     assert agent._on_at_button([{"action": "tapon", "what": "Done"}]) is None
+
+
+def _landscape_agent(verdict: str):
+    """The phone turns landscape after the first tap (a video went full screen); the model judges the goal."""
+    class Phone:
+        async def tap(self, x, y, aim=False):
+            screen.landscape = True
+
+    class TurningScreen(Screen):
+        landscape = False
+
+        @property
+        def aspect(self):
+            return 1.78 if self.landscape else 0.46
+
+        async def settled(self):
+            return None
+
+    class Actor:
+        model = "fake"
+
+        async def chat(self, system, text, image=None, max_tokens=600, temperature=0, fast=False):
+            if "landscape screen now" in system:
+                return verdict
+            return "THINK: open the first video\nDO: tap 300 200"
+
+    screen = TurningScreen()
+    return Agent(phone=Phone(), screen=screen, actor=Actor(), planner=PlanLLM(), trace=Trace())
+
+
+def test_landscape_after_the_goal_is_reached_counts_as_done(monkeypatch):
+    from hidagent import agent as agent_module
+
+    monkeypatch.setattr(agent_module.vision, "changed", lambda *a, **k: True)
+    agent = _landscape_agent("长安姑娘的第一个视频正在全屏播放\nyes")
+
+    async def run():
+        agent.start("打开哔哩哔哩，搜索长安姑娘，打开第一个视频")
+        await agent._job
+
+    asyncio.run(run())
+    assert agent.steps[-1]["action"] == "done" and "全屏播放" in agent.steps[-1]["answer"]
+
+
+def test_landscape_before_the_goal_still_fails(monkeypatch):
+    from hidagent import agent as agent_module
+
+    monkeypatch.setattr(agent_module.vision, "changed", lambda *a, **k: True)
+    agent = _landscape_agent("A bilibili ad is playing\nno")
+
+    async def run():
+        agent.start("打开哔哩哔哩，搜索长安姑娘，打开第一个视频")
+        await agent._job
+
+    asyncio.run(run())
+    assert agent.steps[-1]["action"] == "fail" and "landscape" in agent.steps[-1]["reason"]

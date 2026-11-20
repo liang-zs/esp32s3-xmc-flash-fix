@@ -140,7 +140,9 @@ OPENING AN APP:
 
 TEXT INPUT: type sends ASCII only. Other fields than Spotlight: tap them first if no cursor shows. After
 typing, check the text appeared; if not, refocus the field. A hidden on-screen keyboard does not mean the
-field lost focus (the USB keyboard can hide it). Never tap on-screen keyboard keys for letters or punctuation:
+field lost focus (the USB keyboard can hide it). The input-source picker (a small list: English (US), 简体拼音,
+Emoji, ...) closes by itself: DO: wait, never tap it or near it (a tap there hit a search suggestion).
+Never tap on-screen keyboard keys for letters or punctuation:
 type them (full-width ！？，。 in the goal next to Latin text: type ! ? , .).
 
 CHINESE: "type" turns Chinese characters into garbage. Use pinyin with the toneless letters of the whole
@@ -331,6 +333,15 @@ AT_BUTTON_AT_Q = ("Is the AssistiveTouch floating button (a translucent gray rou
                    "centered at about x={x}, y={y} on the 0-1000 grid, within 40 units? It may sit over the "
                    "keyboard's bottom row or a toolbar. The small plain gray dot is the mouse pointer, not the "
                    "button. Answer yes or no.")
+# The screen turned landscape (a full-screen video): nothing can be done in landscape, but the goal may already be
+# reached (bilibili-search, 2026-11-20: the first video opened, went full screen, and the run counted as failed).
+LANDSCAPE_DONE_PROMPT = ("You check whether a task on an iPhone is finished, from one screenshot. The phone shows a "
+                         "landscape screen now, e.g. a video playing full screen.")
+LANDSCAPE_DONE_Q = ("Goal: {task}\nIs this goal achieved on this screen (only what the goal asks for counts)? Reply "
+                    "with one line for the user, in the goal's language, describing what the screen shows, then a last "
+                    "line: yes or no.")
+PORTRAIT_WAIT = 2.0  # a landscape frame mid-task can be a mirroring glitch: wait this long for portrait to return
+
 IS_HOME_PROMPT = "You look at iPhone screenshots and answer questions about them with one word: yes or no."
 IS_HOME_Q = ("Is this the iPhone Home Screen: a page of app icons with names, with the Dock row of apps at the "
              "bottom (or the App Library page), and no app open, no full-screen video, no search screen? "
@@ -585,7 +596,13 @@ class Agent:
                     deadline, steps_left = time.time() + self.max_seconds, self.max_steps
         except asyncio.CancelledError:
             self._record(action="stopped")
-        except BlindError as e:  # no screen, or a landscape one: acting would be guessing
+        except LandscapeError as e:  # acting would be guessing, but the goal may already be reached
+            answer = await self._landscape_done()
+            if answer:
+                self._record(self.screen.frame, action="done", answer=answer, note="judged on a landscape screen")
+            else:
+                self._record(action="fail", reason=str(e))
+        except BlindError as e:  # no screen: acting would be guessing
             self._record(action="fail", reason=str(e))
         except Exception as e:  # e.g. the planner itself is unreachable
             self._record(action="error", reason=repr(e))
@@ -957,8 +974,32 @@ class Agent:
                     park, f"using where it was last time, {known}" if known else "no earlier position")
         return known
 
-    async def _keyboard(self) -> str:
-        """Which on-screen keyboard shows: pinyin, english, other or none (one fast question on the frame)."""
+    async def _landscape_done(self) -> str:
+        """The screen went landscape: is the goal reached anyway? The answer for the user, or "" (not reached, or
+        nothing done yet, or the check failed). One question, no action."""
+        if not any(s.get("act_s") is not None for s in self.steps) or not self.screen.frame:
+            return ""
+        try:
+            reply = await self.actor.chat(LANDSCAPE_DONE_PROMPT, LANDSCAPE_DONE_Q.format(task=self.task),
+                                          self.screen.frame)
+        except Exception as e:  # best effort: the task fails as before
+            log.warning("landscape goal check failed: %r", e)
+            return ""
+        lines = [x.strip() for x in reply.strip().splitlines() if x.strip()]
+        self.trace.write(self.screen.frame, kind="locate", question="landscape done?", reply=reply[-200:], spot=None)
+        if not lines or not lines[-1].lower().strip(" .*").startswith("yes"):
+            return ""
+        return (" ".join(lines[:-1]) or "目标已达成")[:300]
+
+    async def _keyboard(self, recheck: bool = True) -> str:
+        """Which on-screen keyboard shows: pinyin, english, other or none (one fast question on the frame).
+        bilibili-search, 2026-11-20: the question got a 1920x1080 frame (a mirroring glitch while bilibili showed a
+        landscape overlay), answered none, and the blind fallback typed Latin 'changanguniang'. So: look at a
+        portrait frame only, and ask once more before believing 'none'."""
+        waited = 0.0
+        while self.screen.aspect > 1 and waited < PORTRAIT_WAIT:
+            await asyncio.sleep(0.2)
+            waited += 0.2
         frame = self.screen.frame
         fast = bool(getattr(self.actor, "fast_extra", None))
         reply = await (self.actor.chat(ONE_WORD_PROMPT, KEYBOARD_Q, frame, max_tokens=300, fast=True) if fast
@@ -970,6 +1011,9 @@ class Agent:
         kind = ("pinyin" if any(w in last for w in ("pinyin", "空格", "选定")) else "english" if "english" in last
                 else "none" if "none" in last else "other")
         self.trace.write(frame, kind="locate", question=KEYBOARD_Q, reply=reply[-60:], spot=None, keyboard=kind)
+        if kind == "none" and recheck:
+            await asyncio.sleep(0.5)
+            return await self._keyboard(recheck=False)
         return kind
 
     async def _switch_keyboard(self, want: str, tries: int = 3) -> str:
