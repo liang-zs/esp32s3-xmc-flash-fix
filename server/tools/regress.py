@@ -5,7 +5,9 @@
 
 Each run starts from the Home Screen (the agent's AssistiveTouch home). A task passes when the agent finishes
 with `done` and, when the task lists `expect`, its answer contains one of those strings; with `min_actions`, a
-pass in fewer actions is SUSPECT (e.g. an answer left on screen by the previous run). Results are appended to
+pass in fewer actions is SUSPECT (e.g. an answer left on screen by the previous run). A task with `help_hint`
+runs the way the web console does (it pauses and asks before giving up); this script answers "replan" with that
+hint, so the ask-for-help path is covered too, and the row counts the helps. Results are appended to
 ~/.hidagent/regress.jsonl with the git commit, so versions can be compared later.
 """
 
@@ -44,22 +46,26 @@ class Landscape(RuntimeError):
     pass
 
 
-def run_agent(c: httpx.Client, text: str, wait: float = 3) -> tuple[dict, dict]:
-    """Start the agent on `text` from the Home Screen and wait; the run summary and the final status."""
+def run_agent(c: httpx.Client, text: str, wait: float = 3, help_hint: str = "") -> tuple[dict, dict]:
+    """Start the agent on `text` from the Home Screen and wait; the run summary and the final status.
+    With `help_hint` the task may pause and ask; each time it does, answer replan with that hint."""
     c.post("/api/agent/clear")
     if status(c)["aspect"] > 1:  # e.g. the previous task left a full-screen video: everything assumes portrait
         raise Landscape("the phone screen is landscape (a full-screen video?): turn it back to portrait")
     go_home(c)
-    r = c.post("/api/agent", json={"text": text})
+    r = c.post("/api/agent", json={"text": text, "ask_help": bool(help_hint)})
     r.raise_for_status()
     time.sleep(wait)
     while (s := status(c))["agent"]["running"]:
+        if help_hint and s["agent"].get("help"):
+            print(f"  asked for help ({s['agent']['help'].get('reason', '')[:80]}): replan with the hint", flush=True)
+            c.post("/api/agent/help", json={"choice": "replan", "hint": help_hint})
         time.sleep(wait)
     return c.get("/api/runs", params={"last": 1}).json()["runs"][-1], s
 
 
 def run_one(c: httpx.Client, task: dict, wait: float = 3) -> dict:
-    run, s = run_agent(c, task["task"], wait)
+    run, s = run_agent(c, task["task"], wait, task.get("help_hint", ""))
     last = s["agent"]["steps"][-1] if s["agent"]["steps"] else {}
     answer = str(last.get("answer", ""))
     verdict = judge(task, run["result"], answer, run["actions"])
@@ -67,7 +73,8 @@ def run_one(c: httpx.Client, task: dict, wait: float = 3) -> dict:
            "answer": answer[:200],
            "reason": run.get("reason", ""), "seconds": run["seconds"], "actions": run["actions"],
            "calls": run.get("calls"), "fast_calls": run.get("fast_calls"), "llm_s": run.get("llm_s"),
-           "cost": run.get("cost"), "think": {k: v for k, v in run.items() if k.startswith("think_")}}
+           "cost": run.get("cost"), "helps": run.get("helps", 0),
+           "think": {k: v for k, v in run.items() if k.startswith("think_")}}
     if task.get("teardown"):  # undo what the task left on the phone (a test note, a playing video); not scored
         try:
             done, _ = run_agent(c, task["teardown"], wait)
@@ -108,6 +115,7 @@ def main() -> None:
                     f.write(json.dumps(row, ensure_ascii=False) + "\n")
                 print(f"{row['verdict']:7s} {row['id']:16s} {row['seconds']:6.1f}s "
                       f"{row['actions']:3d} acts  {row['result']:7s} {row['answer'] or row['reason']}"[:200]
+                      + (f"  [helps: {row['helps']}]" if row.get("helps") else "")
                       + (f"  [teardown: {row['teardown']}]" if "teardown" in row else ""), flush=True)
             if stop:
                 break

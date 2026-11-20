@@ -52,6 +52,13 @@
     "teardown": "打开备忘录，删除内容为“测试笔记”的那条备忘录，然后回到主屏幕"
   },
   {
+    "id": "freeform-smiley",
+    "task": "打开无边记，新建一个白板，用画笔画一个笑脸",
+    "note": "drawing strokes (circle, path) after picking the pen tool, an icon without text; leaves a new board each run (no teardown: deleting boards on the phone is left to the user). Runs with ask-for-help: regress answers replan with the hint",
+    "min_actions": 6,
+    "help_hint": "画笔在底部工具栏最左边（圆圈里一支笔的图标），选中后在白板中间画：先画脸的大圆，再画两只眼睛和嘴巴"
+  },
+  {
     "id": "bilibili-search",
     "task": "打开哔哩哔哩，搜索长安姑娘，打开第一个视频",
     "note": "third-party app, Chinese input through pinyin; last in the set: it ends with a video playing (it went full screen in landscape once)",
