@@ -78,6 +78,7 @@ uv run --env-file .env python -m hidagent
 | --- | --- | --- |
 | `PORT` | `8890` | Web UI 端口 |
 | `DEVICE_PORT` | `7300` | ESP32 板反向连接的端口 |
+| `WEB_TOKEN` | — | 网页控制台的访问口令：从别的设备（如手机浏览器）打开要先输口令，之后记住 30 天；本机（127.0.0.1）免口令，脚本可带 `Authorization: Bearer <口令>`；同一地址连错 5 次锁 1 分钟 |
 | `LINK_KEY` | — | 与固件 `secrets.h` 相同的随机串：开启 Wi-Fi 自动发现（UDP 7301 广播）并校验板子连的是这台 Mac |
 | `DEVICE_SERIAL` | — | 板子走 USB 串口：串口路径（如 `/dev/cu.usbserial-110`），或 `auto` 自动找（CP210x / CH34x / FTDI）；串口在线时板子不再连 Wi-Fi，服务器也拒绝 Wi-Fi 接入 |
 | `AIRPLAY_NAME` | `iPhone Agent` | 投屏列表里显示的名字 |

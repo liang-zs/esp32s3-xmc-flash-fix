@@ -11,6 +11,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from . import webauth
 from .agent import Agent
 from .debug import Trace
 from .device import Device, DeviceError
@@ -57,6 +58,7 @@ async def lifespan(_):
 
 
 app = FastAPI(lifespan=lifespan)
+webauth.install(app, os.environ.get("WEB_TOKEN", ""))  # optional console password
 class Static(StaticFiles):
     """Static files that browsers re-check on every load, so a new version shows up on refresh."""
 
