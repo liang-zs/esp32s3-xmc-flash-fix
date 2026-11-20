@@ -118,7 +118,7 @@ uv run --env-file .env python -m hidagent
 
 ## 测试
 
-`server/tests/` 有 119 个测试，当前全部通过（agent 回复解析、恢复与计划进度、home/tapon/press、device 协议与超时、串口链路（pty 模拟板子：启动日志、中途重启、拔线、Wi-Fi 让位）、Wi-Fi 发现与密钥校验、llm 的 token 参数与快速模式、vision 差分与指针识别、phone 闭环瞄准与双击、状态机升级、App 名映射、回归判定）。
+`server/tests/` 有 132 个测试，当前全部通过（放弃前求助（暂停、带提示重新规划、超时、次数上限）、网页口令、agent 回复解析、恢复与计划进度、home/tapon/press、device 协议与超时、串口链路（pty 模拟板子：启动日志、中途重启、拔线、Wi-Fi 让位）、Wi-Fi 发现与密钥校验、llm 的 token 参数与快速模式、vision 差分与指针识别、phone 闭环瞄准与双击、状态机升级、App 名映射、回归判定）。
 
 真机回归（会占用手机几分钟到二十几分钟）：
 
